@@ -1,0 +1,11 @@
+# Lint, type and coverage tooling on top of the runtime pins. What CI runs:
+#
+#     .venv/bin/pip install -r requirements-dev.txt
+#     .venv/bin/ruff check dfsi tests && .venv/bin/ruff format --check dfsi tests
+#     .venv/bin/mypy
+#     .venv/bin/python -m pytest --cov
+-r requirements.txt
+ruff==0.17.5
+mypy==2.4.1
+pytest-cov==7.1.0
+coverage==7.17.3

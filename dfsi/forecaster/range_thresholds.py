@@ -41,6 +41,8 @@ def load_range_thresholds(path: Path) -> dict[int, float]:
                 value = float(rng["risk_threshold"])
                 RiskBands.for_threshold(value)
             except (TypeError, ValueError) as exc:
-                raise ValueError(f"{path}: range {range_id} has an invalid risk_threshold: {exc}") from exc
+                raise ValueError(
+                    f"{path}: range {range_id} has an invalid risk_threshold: {exc}"
+                ) from exc
             thresholds[range_id] = value
     return thresholds

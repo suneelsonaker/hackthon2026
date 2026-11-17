@@ -18,6 +18,7 @@ import math
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -76,7 +77,9 @@ class RiskBands:
     def for_threshold(cls, threshold: float) -> RiskBands:
         # `not (0 < x < 1)` also rejects NaN, which every comparison misses.
         if not 0.0 < threshold < 1.0:
-            raise ValueError(f"decision threshold must lie strictly between 0 and 1, got {threshold}")
+            raise ValueError(
+                f"decision threshold must lie strictly between 0 and 1, got {threshold}"
+            )
         return cls(
             watch=threshold / 2.0,
             warn=threshold,
@@ -151,7 +154,7 @@ class ForecasterService:
 
     def __init__(self, model_path: Path | None = None) -> None:
         self.model_path = model_path or (PATHS.models / "forecaster.pkl")
-        self._model = None
+        self._model: Any = None  # a fitted sklearn estimator once loaded
         self._features: list[str] = list(FEATURE_COLUMNS)
         self._importance: dict[str, float] = {}
         #: Typical quiet-window value of each feature; the yardstick for
@@ -172,8 +175,7 @@ class ForecasterService:
     def _load(self) -> None:
         if not self.model_path.exists():
             self.load_error = (
-                f"no trained model at {self.model_path}; "
-                "run `python -m dfsi.forecaster.train`"
+                f"no trained model at {self.model_path}; run `python -m dfsi.forecaster.train`"
             )
             log.warning(self.load_error)
             return
@@ -197,12 +199,16 @@ class ForecasterService:
             if gate is not None:
                 gate = float(gate)
                 if not math.isfinite(gate) or gate < 0:
-                    raise ValueError(f"evidence gate must be a finite non-negative number, got {gate}")
+                    raise ValueError(
+                        f"evidence gate must be a finite non-negative number, got {gate}"
+                    )
             self.evidence_gate_deviation = gate
             version = payload.get("model_version") or ""
             run_id = payload.get("mlflow_run_id") or ""
             self.model_version = (
-                f"{self.feature_version}/v{version}" if version else f"{self.feature_version}/{run_id[:8] or 'local'}"
+                f"{self.feature_version}/v{version}"
+                if version
+                else f"{self.feature_version}/{run_id[:8] or 'local'}"
             )
             if self.feature_version != FEATURE_VERSION:
                 self.load_error = (
@@ -263,9 +269,7 @@ class ForecasterService:
             score = float(scores[best])
         except Exception as exc:
             log.exception("scoring failed for range %s", range_id)
-            return self._degraded(
-                epoch, range_id, account_id, f"scoring error: {exc}", threshold
-            )
+            return self._degraded(epoch, range_id, account_id, f"scoring error: {exc}", threshold)
 
         # A score above threshold raises an alert only with traffic evidence behind
         # it. The score itself is untouched; a gated window reads as `watch`, so
@@ -431,7 +435,11 @@ class ForecasterService:
             for item in items:
                 item["contribution"] = round(contributions.get(item["feature"], 0.0), 4)
             items.sort(
-                key=lambda item: (abs(item["contribution"]), item["importance"], abs(item["value"])),
+                key=lambda item: (
+                    abs(item["contribution"]),
+                    item["importance"],
+                    abs(item["value"]),
+                ),
                 reverse=True,
             )
         return items[:top_n]

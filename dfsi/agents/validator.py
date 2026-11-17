@@ -4,13 +4,15 @@ Every agent output passes through here before a human sees it. The validator
 is deliberately boring, deterministic and written in plain Python: it is the
 component that must not be able to hallucinate.
 
-Five checks, from the safety design:
+Seven checks, from the safety design:
 
-1. **tenant scope**   — the output may only discuss the requested account/range
-2. **output format**  — required fields present, correct types, bounded length
-3. **freshness**      — the evidence is recent enough to still be true
-4. **evidence**       — every number cited appears in the evidence bundle
-5. **allowed actions** — only the four fixed candidates, never an executed one
+1. **tenant scope**    — the output may only discuss the requested account/range
+2. **output format**   — required fields present, correct types, bounded length
+3. **freshness**       — the evidence is recent enough to still be true
+4. **evidence**        — every number in the prose appears in the evidence bundle
+5. **citations**       — every structured citation names a real feature, at its real value
+6. **allowed actions** — only the four fixed candidates, never an executed one
+7. **tool use**        — the agent used (or tried) only the tools its role allows
 
 A failure is never silently repaired. The output is replaced with a
 monitoring-only notice that states what failed.
@@ -18,11 +20,18 @@ monitoring-only notice that states what failed.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
-from ..config import STATE_MONITORING_ONLY, WINDOW_SECONDS
+from ..config import (
+    HORIZON_SECONDS,
+    STATE_MONITORING_ONLY,
+    THRESHOLDS_BY_ENV,
+    WINDOW_SECONDS,
+)
 from ..rehearsal.simulator import CANDIDATES_BY_KEY
 
 #: Oldest evidence the validator will let through, in seconds.
@@ -47,10 +56,24 @@ _RISK_NUMBER_PATTERNS = (
     r"\bI (?:estimate|calculate|compute|assess) (?:the )?(?:risk|probability)\b",
 )
 
-#: Numbers in prose that must be traceable to the bundle. Percentages, decimals
-#: and multi-digit integers; bare small integers (1-4 option counts, "two
-#: agents") are not treated as claims.
-_NUMBER_IN_TEXT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w])")
+#: Every number in prose must be traceable to the bundle, with two narrow
+#: exceptions below: structural durations quoted *with a seconds unit*, and bare
+#: small counts. Neither exception covers a rate, a size or a percentage.
+#: A trailing unit glued to the digits ("300Mbps", "10x") does not hide a figure.
+_NUMBER_IN_TEXT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\d.]\d|\d)")
+
+#: Scientific notation ("1e6", "2.5E+3") is a figure the digit scan would read
+#: as a small count; it is never how the bundle states a value, so it is refused.
+_SCIENTIFIC = re.compile(r"(?<![\w.])\d+(?:\.\d+)?[eE][+-]?\d+\b")
+
+#: A figure spelled out in words cannot be traced to the bundle. Small counts
+#: ("two agents", "four options") stay allowed, like their digit forms.
+_NUMBER_WORDS = re.compile(
+    r"\b(?:five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+    r"sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+    r"eighty|ninety|hundreds?|thousands?|millions?|billions?|dozens?)\b",
+    re.IGNORECASE,
+)
 
 #: Names that contain digits but are not claims about this incident: ticket ids
 #: ("PPNG-6760") and CIDR prefix lengths ("/24"). The Advisor's own prompt tells
@@ -59,9 +82,34 @@ _NUMBER_IN_TEXT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w])")
 #: lengths are limited to /8-/32 so an arbitrary "/87" cannot hide a figure.
 _REFERENCE_NAMES = re.compile(r"\b[A-Z]{2,}[A-Z0-9]*(?:-\d+)+\b|/(?:[89]|[12]\d|3[0-2])\b")
 
-#: Tolerated tokens that appear in explanatory prose but are not claims about
-#: this incident: the horizon, the window size and the option count.
-_ALWAYS_ALLOWED_NUMBERS = {"120", "10", "60", "4", "2", "1", "3", "0", "300", "30"}
+#: Durations that describe how DFSI works rather than this incident: the
+#: forecast horizon, the window size, the one-minute feature lookback, each
+#: environment's start duration and the default waits the drill prices. They
+#: are tolerated only as durations ("120 seconds", "a 10s window"), so "120 pps"
+#: or "300 Mbps" must still be found in the bundle.
+STRUCTURAL_SECONDS: frozenset[int] = frozenset(
+    {HORIZON_SECONDS, WINDOW_SECONDS, 60, 90}
+    | {t.start_duration_seconds for t in THRESHOLDS_BY_ENV.values()}
+)
+_STRUCTURAL_DURATION = re.compile(
+    r"(?<![\w.])(?:" + "|".join(str(n) for n in sorted(STRUCTURAL_SECONDS, reverse=True)) + r")"
+    r"(?:\s*-?\s*)(?:s|secs?|seconds?)\b",
+    re.IGNORECASE,
+)
+
+#: Bare integers this small are counts ("4 options", "2 windows in a row"), not
+#: claims, unless a unit or percent sign makes them a measurement.
+_SMALL_COUNTS = frozenset({"0", "1", "2", "3", "4"})
+_MEASUREMENT_UNIT = re.compile(
+    r"\s*(?:%|percent|[kmg]?pps\b|[kmg]?bps\b|[kmg]b/s|x\b|times\b"
+    # A magnitude suffix makes a small digit a large figure: "4M pps", "3k", "4K-fold".
+    r"|[kmbg](?=\b|-)|-?fold\b)",
+    re.IGNORECASE,
+)
+
+#: How far a cited value may sit from the bundle's: agents round for prose, so
+#: 0.5512 quoted as 0.55 is the same figure, while 0.6 is not.
+CITATION_REL_TOLERANCE = 0.01
 
 #: A range or account named in prose by its numeric id ("range 90110002").
 #: Six or more digits, so ordinary figures such as "range 2000 pps" are not
@@ -157,24 +205,38 @@ def check_output_format(
 
 
 def check_freshness(
-    evidence_epoch: int, now_epoch: int, report: ValidationReport
+    evidence_epoch: int,
+    now_epoch: int,
+    report: ValidationReport,
+    forecast_epoch: int | None = None,
+    skew_seconds: int = WINDOW_SECONDS,
 ) -> None:
-    age = now_epoch - evidence_epoch
-    if age < -WINDOW_SECONDS:
-        report.fail("freshness", f"evidence is {-age}s in the future")
+    """Two halves, each measured on the evidence that can violate it.
+
+    * Look-ahead: the *newest* evidence must not postdate "now" by more than
+      `skew_seconds`. Against a live wall clock one window of skew is normal
+      (window boundaries vs the clock); a replay's "now" is the exact decision
+      instant, so the caller passes 0 and a single leaked window fails.
+    * Staleness: the *forecast being explained* must be recent. Measured on the
+      forecast rather than the newest row, so a briefing on a ten-minute-old
+      forecast fails even when fresher traffic rows sit beside it — which is
+      what lets the check bite in a replay, where "now" is the decision instant.
+    """
+    ahead = evidence_epoch - now_epoch
+    if ahead > skew_seconds:
+        report.fail("freshness", f"evidence is {ahead}s in the future")
         return
+    age = now_epoch - (forecast_epoch if forecast_epoch is not None else evidence_epoch)
     if age > MAX_EVIDENCE_AGE_SECONDS:
         report.fail(
             "freshness",
-            f"evidence is {age}s old, limit is {MAX_EVIDENCE_AGE_SECONDS}s",
+            f"the forecast is {age}s old, limit is {MAX_EVIDENCE_AGE_SECONDS}s",
         )
         return
     report.ok("freshness")
 
 
-def check_evidence(
-    output: dict, citable: set[str], report: ValidationReport
-) -> None:
+def check_evidence(output: dict, citable: set[str], report: ValidationReport) -> None:
     """No invented numbers, and no risk score of the agent's own making."""
     texts = _iter_strings(output)
     joined = " ".join(texts)
@@ -189,14 +251,29 @@ def check_evidence(
             )
             return
 
-    # Only the figure scan skips reference names; the risk-figure patterns above
-    # still read the full text.
+    # Only the figure scan skips reference names and structural durations; the
+    # risk-figure patterns above still read the full text.
+    scanned = _STRUCTURAL_DURATION.sub(" ", _REFERENCE_NAMES.sub(" ", joined))
+    untraceable: tuple[tuple[re.Pattern[str], str], ...] = (
+        (_SCIENTIFIC, "scientific notation"),
+        (_NUMBER_WORDS, "a number in words"),
+    )
+    for spelled, kind in untraceable:
+        found = spelled.search(scanned)
+        if found:
+            report.fail(
+                "evidence",
+                f"figure written as {kind} cannot be traced to the bundle: "
+                f"{found.group(0)!r}. Quote the value in digits, as the tools give it.",
+            )
+            return
     unsupported: list[str] = []
-    for raw in _NUMBER_IN_TEXT.findall(_REFERENCE_NAMES.sub(" ", joined)):
+    for match in _NUMBER_IN_TEXT.finditer(scanned):
+        raw = match.group(1)
         normalised = raw.rstrip("0").rstrip(".") if "." in raw else raw
-        if normalised in _ALWAYS_ALLOWED_NUMBERS or raw in _ALWAYS_ALLOWED_NUMBERS:
-            continue
         if normalised in citable or raw in citable:
+            continue
+        if raw in _SMALL_COUNTS and not _MEASUREMENT_UNIT.match(scanned, match.end()):
             continue
         unsupported.append(raw)
 
@@ -210,6 +287,50 @@ def check_evidence(
     if not output.get("evidence_cited"):
         report.warnings.append("output cites no specific evidence items")
     report.ok("evidence")
+
+
+def check_citations(
+    output: dict, citable_values: dict[str, list[float]], report: ValidationReport
+) -> None:
+    """Each structured citation must name a feature the agent was shown, at its value.
+
+    The prose scan proves a number exists somewhere in the bundle; this proves
+    it belongs to the feature it is attributed to. "country_hhi 0.82" fails when
+    0.82 is the blocked share and the source mix is broad.
+    """
+    for item in output.get("evidence_cited") or []:
+        if not isinstance(item, dict):
+            continue  # free-text citations are covered by the prose scan
+        feature = item.get("feature")
+        if feature is None:
+            report.fail("citations", f"citation without a feature name: {item!r}")
+            return
+        if feature not in citable_values:
+            report.fail("citations", f"cited feature {feature!r} is not in the evidence bundle")
+            return
+        value = item.get("value")
+        if value is None:
+            continue
+        try:
+            quoted = float(value)
+        except (TypeError, ValueError):
+            report.fail("citations", f"cited value for {feature!r} is not a number: {value!r}")
+            return
+        known = citable_values[feature]
+        if known and not any(_same_figure(quoted, actual) for actual in known):
+            report.fail(
+                "citations",
+                f"{feature} cited as {quoted:g}, but the bundle shows "
+                f"{sorted({round(v, 4) for v in known})[:4]}",
+            )
+            return
+    report.ok("citations")
+
+
+def _same_figure(quoted: float, actual: float) -> bool:
+    if math.isnan(quoted) or math.isnan(actual):
+        return False
+    return math.isclose(quoted, actual, rel_tol=CITATION_REL_TOLERANCE, abs_tol=1e-6)
 
 
 def check_allowed_actions(output: dict, report: ValidationReport) -> None:
@@ -239,9 +360,7 @@ def check_allowed_actions(output: dict, report: ValidationReport) -> None:
     report.ok("allowed_actions")
 
 
-def check_tool_use(
-    calls: Sequence[dict], allowed: Sequence[str], report: ValidationReport
-) -> None:
+def check_tool_use(calls: Sequence[dict], allowed: Sequence[str], report: ValidationReport) -> None:
     """The agent may only have used the tools its role permits.
 
     Refused attempts count: the toolbox records them with `denied: true`, and
@@ -266,13 +385,18 @@ def validate(
     now_epoch: int,
     tool_calls: Sequence[dict] = (),
     allowed_tools: Sequence[str] = (),
+    citable_values: dict[str, list[float]] | None = None,
+    forecast_epoch: int | None = None,
+    clock_skew_seconds: int = WINDOW_SECONDS,
 ) -> ValidationReport:
     """Run all checks. Order matters only for which failure is reported first."""
     report = ValidationReport(passed=True)
     check_output_format(output, required_fields, report)
     check_tenant_scope(output, expected_account_id, expected_range_id, report)
-    check_freshness(evidence_epoch, now_epoch, report)
+    check_freshness(evidence_epoch, now_epoch, report, forecast_epoch, clock_skew_seconds)
     check_evidence(output, citable_numbers, report)
+    if citable_values is not None:
+        check_citations(output, citable_values, report)
     check_allowed_actions(output, report)
     if allowed_tools:
         check_tool_use(tool_calls, allowed_tools, report)

@@ -9,6 +9,7 @@
 # Needs a JDK 11/17/21; scripts/env.sh finds one and fails loudly if it cannot.
 set -eu
 cd "$(dirname "$0")/.."
+export DFSI_REQUIRE_JDK=1
 # shellcheck source=scripts/env.sh
 . scripts/env.sh
 

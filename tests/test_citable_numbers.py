@@ -15,8 +15,8 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from conftest import ACCOUNT_ID, RANGE_ID
+
 from dfsi.agents.orchestrator import ExplainerOrchestrator
 from dfsi.agents.prompts import ADVISOR_SYSTEM
 from dfsi.agents.tools import EvidenceBundle, numeric_forms
@@ -53,9 +53,20 @@ def test_negative_value_is_citable_by_its_magnitude():
     assert "-0.4231" not in forms  # the validator never sees a sign
 
 
-@pytest.mark.parametrize("rendering", ["0.4231", "0.423", "0.42", "0.4", "0", "42.31", "42.3", "42"])
+@pytest.mark.parametrize("rendering", ["0.4231", "0.423", "0.42", "42.31", "42.3", "42"])
 def test_rounded_and_percentage_renderings_are_citable(rendering):
     assert rendering in numeric_forms(0.4231)
+
+
+@pytest.mark.parametrize("too_coarse", ["0.4", "0", "40"])
+def test_a_rounding_more_than_5_percent_off_is_not_a_quote(too_coarse):
+    assert too_coarse not in numeric_forms(0.4231)
+
+
+def test_small_values_no_longer_donate_a_nearby_integer():
+    assert "7" not in numeric_forms(7.4)  # 5.4% off
+    assert "7.4" in numeric_forms(7.4)
+    assert "57" in numeric_forms(57.3)  # 0.5% off: a faithful rounding
 
 
 @pytest.mark.parametrize("invented", ["0.43", "0.4232", "0.5", "43", "41.9"])
@@ -74,7 +85,9 @@ def test_large_identifiers_survive_unrounded():
     assert str(RANGE_ID) in numeric_forms(RANGE_ID)
 
 
-@pytest.mark.parametrize("value", [None, True, False, "0.5", [0.5], float("nan"), math.inf, -math.inf])
+@pytest.mark.parametrize(
+    "value", [None, True, False, "0.5", [0.5], float("nan"), math.inf, -math.inf]
+)
 def test_non_numbers_and_non_finite_values_yield_nothing(value):
     assert numeric_forms(value) == set()
 

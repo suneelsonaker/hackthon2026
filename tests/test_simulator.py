@@ -8,8 +8,8 @@ conflates, plus the per-traffic-type threshold evaluation.
 from __future__ import annotations
 
 import pytest
-
 from conftest import EPOCH, POLICY_PPS, attack_windows, make_row, quiet_windows
+
 from dfsi.rehearsal.simulator import (
     CANDIDATES,
     CANDIDATES_BY_KEY,

@@ -11,11 +11,11 @@ import pickle
 
 import pytest
 from sklearn.ensemble import HistGradientBoostingClassifier
+from test_evidence_attribution import FEATURES, row_for, training_data
 
 from dfsi.config import FEATURE_VERSION, STATE_ABOUT_TO_START
 from dfsi.forecaster.serve import ForecasterService
 from dfsi.forecaster.train import quiet_reference
-from test_evidence_attribution import FEATURES, row_for, training_data
 
 GATE = 3.0
 ALERT = dict(growth_pps_60s=1.9, country_hhi=0.8)
@@ -31,9 +31,14 @@ def trained():
 def service(tmp_path, trained, gate=GATE) -> ForecasterService:
     model, frame, label = trained
     payload = {
-        "model": model, "features": FEATURES, "feature_version": FEATURE_VERSION,
-        "decision_threshold": 0.5, "min_consecutive": 2, "model_version": "1",
-        "mlflow_run_id": "", "feature_importance": {},
+        "model": model,
+        "features": FEATURES,
+        "feature_version": FEATURE_VERSION,
+        "decision_threshold": 0.5,
+        "min_consecutive": 2,
+        "model_version": "1",
+        "mlflow_run_id": "",
+        "feature_importance": {},
         "feature_reference": quiet_reference(frame[FEATURES], label),
         "evidence_gate_deviation": gate,
     }

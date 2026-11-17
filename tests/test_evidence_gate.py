@@ -14,22 +14,21 @@ state raised.
 
 from __future__ import annotations
 
-import math
 import pickle
 import random
 
 import numpy as np
 import pandas as pd
 import pytest
-
 from conftest import EPOCH, make_row
+from test_risk_bands import StubModel
+
 from dfsi.api import replay as replay_engine
 from dfsi.config import FEATURE_VERSION, STATE_ABOUT_TO_START, STATE_MONITORING_ONLY
 from dfsi.forecaster.gate import EVIDENCE_FEATURE, apply_gate, has_traffic_evidence
 from dfsi.forecaster.serve import ForecasterService
 from dfsi.forecaster.train import TrainConfig, _describe_gate, calibrate_threshold
 from dfsi.memory.features import FEATURE_COLUMNS
-from test_risk_bands import StubModel
 
 GATE = 3.0
 THRESHOLD = 0.6
@@ -107,7 +106,12 @@ def calibration_frame() -> pd.DataFrame:
     layout = {
         "attack": ("gradual_buildup", [0.1, 0.1, 0.9, 0.9, 0.9, 0.9], [0.2, 0.2, 6, 8, 9, 9], 5),
         "calm": ("normal", [0.1] * 6, [0.2] * 6, None),
-        "hot_context": ("flash_crowd", [0.1, 0.9, 0.9, 0.9, 0.1, 0.1], [0.2, 1.0, 1.1, 1.3, 0.2, 0.2], None),
+        "hot_context": (
+            "flash_crowd",
+            [0.1, 0.9, 0.9, 0.9, 0.1, 0.1],
+            [0.2, 1.0, 1.1, 1.3, 0.2, 0.2],
+            None,
+        ),
     }
     for sid, (kind, scores, deviations, onset) in layout.items():
         for i, (score, dev) in enumerate(zip(scores, deviations)):
@@ -140,7 +144,9 @@ def test_the_threshold_is_calibrated_on_the_raw_score_whatever_the_gate():
 
 def test_the_sweep_sees_the_context_driven_false_alarm_the_gate_exists_to_remove():
     """The raw sweep counts the flash crowd as a false alarm; the gate removes it later."""
-    _, sweep = calibrate_threshold(CarrierModel(), calibration_frame(), TrainConfig(min_consecutive=2))
+    _, sweep = calibrate_threshold(
+        CarrierModel(), calibration_frame(), TrainConfig(min_consecutive=2)
+    )
     at_half = next(row for row in sweep if row["threshold"] == 0.5)
     assert at_half["false_alarm_rate"] == pytest.approx(0.5)  # 1 of 2 quiet scenarios alerts
     frame = calibration_frame()
@@ -160,7 +166,11 @@ def test_the_report_says_how_many_alerting_windows_the_gate_withheld():
     assert report["min_deviation"] == GATE and report["feature"] == EVIDENCE_FEATURE
     assert report["windows_above_threshold"] == 7  # 4 attack windows + 3 context windows
     assert report["windows_withheld"] == 3  # the context-driven ones only
-    assert set(report["per_scenario_type_without_gate"]) == {"gradual_buildup", "normal", "flash_crowd"}
+    assert set(report["per_scenario_type_without_gate"]) == {
+        "gradual_buildup",
+        "normal",
+        "flash_crowd",
+    }
 
 
 def test_the_default_bar_is_the_pipelines_own_abnormal_window_threshold():
@@ -250,7 +260,10 @@ def test_the_band_and_the_state_can_never_disagree(tmp_path):
         for deviation in (None, -4.0, 0.0, 3.0, 3.1, 12.0):
             result = forecast(service(tmp_path, score=score), deviation)
             in_warning_band = result.risk_band in ("warn", "critical")
-            assert in_warning_band == (result.predicted_state == STATE_ABOUT_TO_START), (score, deviation)
+            assert in_warning_band == (result.predicted_state == STATE_ABOUT_TO_START), (
+                score,
+                deviation,
+            )
 
 
 def test_training_and_serving_make_the_same_decision(tmp_path):

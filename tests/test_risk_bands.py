@@ -15,8 +15,8 @@ import pickle
 
 import numpy as np
 import pytest
-
 from conftest import EPOCH, make_row
+
 from dfsi.config import FEATURE_VERSION, STATE_ABOUT_TO_START, STATE_MONITORING_ONLY
 from dfsi.forecaster.serve import ForecasterService, RiskBands
 from dfsi.memory.features import FEATURE_COLUMNS
@@ -110,7 +110,12 @@ def test_a_forecast_never_shows_a_warning_band_while_quiet(tmp_path, threshold, 
     assert forecast.degraded is False
     warned_state = forecast.predicted_state == STATE_ABOUT_TO_START
     warned_band = forecast.risk_band in ("warn", "critical")
-    assert warned_band == warned_state, (threshold, score, forecast.risk_band, forecast.predicted_state)
+    assert warned_band == warned_state, (
+        threshold,
+        score,
+        forecast.risk_band,
+        forecast.predicted_state,
+    )
 
 
 def test_the_service_bands_come_from_the_loaded_threshold(tmp_path):

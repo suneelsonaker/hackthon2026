@@ -16,8 +16,8 @@ import copy
 from types import SimpleNamespace
 
 import pytest
-
 from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, attack_windows
+
 from dfsi.agents.orchestrator import ExplainerOrchestrator
 from dfsi.agents.tools import (
     INVESTIGATOR_TOOLS,
@@ -25,6 +25,7 @@ from dfsi.agents.tools import (
     ReadOnlyToolbox,
 )
 from dfsi.agents.validator import ValidationReport, check_tenant_scope, validate
+from dfsi.config import STATE_MONITORING_ONLY
 
 DECISION = EPOCH + 100
 
@@ -233,3 +234,30 @@ def test_a_permitted_tool_call_is_not_flagged(offline):
     reply = offline._execute_tool(block, toolbox, INVESTIGATOR_TOOLS)
     assert "is_error" not in reply
     assert all(not call.get("denied") for call in toolbox.calls)
+
+
+def test_a_stale_forecast_fails_in_a_replay_even_beside_fresh_rows(offline):
+    """Replay path: "now" is the decision instant. A briefing on a forecast from
+    ten minutes earlier is stale, whatever the newest traffic row says."""
+    stale = make_bundle(window_start_epoch=DECISION - 600, as_of_epoch=DECISION)
+    result = offline.run_investigator(stale)
+    assert result.validator_checks["freshness"] is False
+    assert "forecast is 600s old" in " ".join(result.validator_failures)
+
+
+def test_even_one_window_from_the_future_fails_freshness(offline):
+    ahead = make_bundle(window_start_epoch=DECISION + 10, as_of_epoch=DECISION)
+    result = offline.run_investigator(ahead)
+    assert result.validator_checks["freshness"] is False
+    assert "10s in the future" in " ".join(result.validator_failures)
+
+
+def test_an_output_that_breaks_the_validator_is_withheld_not_a_500(offline, monkeypatch):
+    def broken(*_, **__):
+        raise TypeError("unexpected shape")
+
+    monkeypatch.setattr("dfsi.agents.orchestrator.validate", broken)
+    result = offline.run_investigator(make_bundle())
+    assert not result.validated
+    assert result.output["state"] == STATE_MONITORING_ONLY
+    assert "could not check this output (TypeError)" in result.validator_failures[0]

@@ -22,8 +22,8 @@ from a moment nobody could have acted on is overstated by that many windows.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 
 def _check(min_consecutive: int) -> int:

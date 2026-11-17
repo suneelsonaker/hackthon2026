@@ -10,8 +10,8 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-
 from conftest import EPOCH, attack_windows, make_row, quiet_windows
+
 from dfsi.rehearsal.simulator import CANDIDATES_BY_KEY, simulate
 from dfsi.rehearsal.waiting import (
     DEFAULT_WAITS,
@@ -114,9 +114,14 @@ def test_the_horizon_is_held_fixed():
     report = result()
     scrub = CANDIDATES_BY_KEY["full_scrub"]
     fixed = simulate(
-        FLOOD, DECISION, dataclasses.replace(scrub, engagement_delay_seconds=scrub.engagement_delay_seconds + 60)
+        FLOOD,
+        DECISION,
+        dataclasses.replace(scrub, engagement_delay_seconds=scrub.engagement_delay_seconds + 60),
     )
-    assert row(report, "full_scrub", 60)["attack_packets_blocked_pct"] == fixed.attack_packets_blocked_pct
+    assert (
+        row(report, "full_scrub", 60)["attack_packets_blocked_pct"]
+        == fixed.attack_packets_blocked_pct
+    )
 
 
 def test_a_wait_past_the_recording_collapses_to_no_intervention():

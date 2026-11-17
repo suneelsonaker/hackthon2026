@@ -137,7 +137,9 @@ def test_it_does_not_modify_its_inputs():
     values = np.array([6.0, 0.5, 9.0])
     before = values.copy()
     score = float(sigmoid_model(values[None, :])[0])
-    find_counterfactual(sigmoid_model, NAMES, values, REFERENCE, ["a", "b"], LABELS, THRESHOLD, score)
+    find_counterfactual(
+        sigmoid_model, NAMES, values, REFERENCE, ["a", "b"], LABELS, THRESHOLD, score
+    )
     assert np.array_equal(values, before)
 
 

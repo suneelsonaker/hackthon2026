@@ -10,12 +10,11 @@ validated-looking briefing about a window the model had said nothing about.
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
+from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, attack_windows, make_services
 
-from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, attack_windows
 from dfsi.agents.orchestrator import ExplainerOrchestrator
 from dfsi.agents.tools import EvidenceBundle
 from dfsi.config import STATE_MONITORING_ONLY
@@ -69,7 +68,9 @@ def test_an_unscored_window_is_monitoring_only_not_explained(offline):
 def test_the_withheld_briefing_never_says_low_risk(offline):
     briefing = offline.explain(make_bundle(risk_score=None))
     text = " ".join(
-        str(briefing[a]["output"].get(k, "")) for a in ("investigator", "advisor") for k in ("headline", "summary")
+        str(briefing[a]["output"].get(k, ""))
+        for a in ("investigator", "advisor")
+        for k in ("headline", "summary")
     ).lower()
     assert "unknown" in text
     assert "low risk" not in text and "all clear" not in text
@@ -105,13 +106,13 @@ def test_a_score_of_zero_is_a_real_score_not_a_missing_one(offline):
 # ---------------------------------------------------- through the API layer
 
 
-def test_a_down_forecaster_yields_monitoring_only_end_to_end(monkeypatch):
+def test_a_down_forecaster_yields_monitoring_only_end_to_end(tmp_path):
     """The real path: no model on disk -> degraded forecast -> API bundle -> explain."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    api = importlib.import_module("dfsi.api.app")  # `dfsi.api.app` the attribute is the FastAPI object
-
-    monkeypatch.setattr(api, "_forecaster", ForecasterService(Path("/nonexistent/forecaster.pkl")))
-    monkeypatch.setattr(api, "_orchestrator", ExplainerOrchestrator(api_key=None))
+    api = make_services(
+        tmp_path,
+        forecaster=ForecasterService(Path("/nonexistent/forecaster.pkl")),
+        orchestrator=ExplainerOrchestrator(api_key=None),
+    )
     # The shape `load_replay` returns, not the smallest dict that happens to work.
     replay = {
         "replay_id": "sustained_attack__test",
@@ -120,9 +121,9 @@ def test_a_down_forecaster_yields_monitoring_only_end_to_end(monkeypatch):
         "windows": attack_windows(),
     }
 
-    bundle = api._build_bundle(replay, DECISION, include_simulation=True)
+    bundle = api.build_bundle(replay, DECISION, include_simulation=True)
     assert bundle.risk_score is None  # the forecaster said nothing
 
-    briefing = api._orchestrator.explain(bundle)
+    briefing = api.orchestrator.explain(bundle)
     assert briefing["state"] == STATE_MONITORING_ONLY
     assert briefing["advisor"]["output"]["recommended_policy_key"] is None

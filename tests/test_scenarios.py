@@ -6,6 +6,7 @@ the properties that stop a feature from being a disguised label.
 
 from __future__ import annotations
 
+import itertools
 from collections import defaultdict
 
 import numpy as np
@@ -27,9 +28,7 @@ from dfsi.memory.scenarios import (
 EPOCH_BASE = 1_767_225_600
 
 
-def _episode(
-    scenario_type: str, seed: int, vector: str = "udp", hour: int = 13
-) -> pd.DataFrame:
+def _episode(scenario_type: str, seed: int, vector: str = "udp", hour: int = 13) -> pd.DataFrame:
     plan = EpisodePlan(
         scenario_id=f"test-{scenario_type}-{seed}",
         scenario_type=scenario_type,
@@ -91,7 +90,7 @@ def test_attack_history_is_not_a_clock(plans):
     for plan in sorted(plans, key=lambda p: p.start_epoch):
         by_account[plan.range_profile.account_id].append(plan.account_attack_history)
     for account, history in by_account.items():
-        assert any(b < a for a, b in zip(history, history[1:])), account
+        assert any(b < a for a, b in itertools.pairwise(history)), account
 
 
 def test_attack_history_carries_some_signal(plans):
@@ -163,8 +162,7 @@ def test_attack_sizes_straddle_the_bell():
     peak can stay under the line at night.
     """
     rang = [
-        _rings_the_bell(_episode("sustained_attack", seed, hour=seed % 24))
-        for seed in range(120)
+        _rings_the_bell(_episode("sustained_attack", seed, hour=seed % 24)) for seed in range(120)
     ]
     share = float(np.mean(rang))
     assert 0.6 < share < 0.995, f"{share:.1%} of attacks ring the bell"

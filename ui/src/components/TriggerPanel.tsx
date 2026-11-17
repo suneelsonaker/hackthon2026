@@ -19,20 +19,38 @@ interface Props {
 
 interface Account {
   account_id: number
-  ranges: { range_id: number }[]
+  ranges: { range_id: number; hasData: boolean }[]
+  /** At least one of its ranges has traffic to replay. */
+  hasData: boolean
 }
 
-/** Accounts and ranges from the policy store, keeping only ranges that have a replay. */
-function groupByAccount(policies: PolicySnapshot | null, catalogue: CatalogueEntry[]): Account[] {
+/**
+ * Every account and range in the policy store, each marked with whether it
+ * has traffic to replay. Accounts without data are listed (disabled) rather
+ * than hidden: an operator must be able to tell "no traffic yet" from "no
+ * such account". Disabled options cannot be picked, so a replay can never
+ * start on a range other than the one shown.
+ */
+export function groupByAccount(
+  policies: PolicySnapshot | null,
+  catalogue: CatalogueEntry[],
+): Account[] {
   const replayed = new Set(catalogue.map((entry) => entry.range_id))
   const accounts = new Map<number, Account>()
   for (const range of policies?.ranges ?? []) {
-    if (range.account_id === null || !replayed.has(range.range_id)) continue
-    const account = accounts.get(range.account_id) ?? { account_id: range.account_id, ranges: [] }
-    account.ranges.push({ range_id: range.range_id })
+    if (range.account_id === null) continue
+    const account = accounts.get(range.account_id) ?? {
+      account_id: range.account_id,
+      ranges: [],
+      hasData: false,
+    }
+    const hasData = replayed.has(range.range_id)
+    account.ranges.push({ range_id: range.range_id, hasData })
+    account.hasData ||= hasData
     accounts.set(range.account_id, account)
   }
-  return [...accounts.values()]
+  // Accounts with data first, so the default lands on one that can play.
+  return [...accounts.values()].sort((a, b) => Number(b.hasData) - Number(a.hasData))
 }
 
 const SPEEDS = [
@@ -63,22 +81,32 @@ export function TriggerPanel({
   useEffect(() => {
     const uniqueScenarios = [...new Set(catalogue.map((entry) => entry.scenario_type))].sort()
     setScenarios(uniqueScenarios)
-    if (uniqueScenarios.length > 0 && !selectedScenario) {
+    if (uniqueScenarios.length === 0 || selectedScenario) return
+    // Seed the dropdowns from the replay the App chose, so its default wins;
+    // only without one fall back to the first scenario.
+    const initial = catalogue.find((entry) => entry.replay_id === selected)
+    if (initial) {
+      setSelectedScenario(initial.scenario_type)
+      setSelectedRangeId(initial.range_id)
+    } else {
       setSelectedScenario(uniqueScenarios[0])
     }
-  }, [catalogue])
+  }, [catalogue, selected, selectedScenario])
 
   useEffect(() => {
-    if (accounts.length > 0 && !selectedAccountId) {
-      setSelectedAccountId(accounts[0].account_id)
-    }
-  }, [accounts, selectedAccountId])
+    if (accounts.length === 0 || selectedAccountId) return
+    // The account that owns the seeded range, else the first one with data.
+    const owner = accounts.find((acc) => acc.ranges.some((r) => r.range_id === selectedRangeId))
+    const fallback = accounts.find((acc) => acc.hasData) ?? accounts[0]
+    setSelectedAccountId((owner ?? fallback).account_id)
+  }, [accounts, selectedAccountId, selectedRangeId])
 
   useEffect(() => {
     if (selectedAccountId && scenarios.length > 0 && selectedScenario) {
       const account = accounts.find((acc) => acc.account_id === selectedAccountId)
-      if (account && account.ranges.length > 0 && !selectedRangeId) {
-        setSelectedRangeId(account.ranges[0].range_id)
+      const firstWithData = account?.ranges.find((r) => r.hasData)
+      if (firstWithData && !selectedRangeId) {
+        setSelectedRangeId(firstWithData.range_id)
       }
     }
   }, [selectedAccountId, selectedScenario, accounts, selectedRangeId, scenarios])
@@ -136,8 +164,12 @@ export function TriggerPanel({
             disabled={running}
           >
             {accounts.map((account) => (
-              <option key={account.account_id} value={account.account_id}>
-                {account.account_id}
+              <option
+                key={account.account_id}
+                value={account.account_id}
+                disabled={!account.hasData}
+              >
+                {account.hasData ? account.account_id : `${account.account_id} — no data`}
               </option>
             ))}
           </select>
@@ -156,8 +188,8 @@ export function TriggerPanel({
               </option>
             ) : (
               ranges.map((range) => (
-                <option key={range.range_id} value={range.range_id}>
-                  {range.range_id}
+                <option key={range.range_id} value={range.range_id} disabled={!range.hasData}>
+                  {range.hasData ? range.range_id : `${range.range_id} — no data`}
                 </option>
               ))
             )}

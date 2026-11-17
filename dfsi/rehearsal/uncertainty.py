@@ -25,8 +25,8 @@ Seeded and deterministic: the same inputs give the same bands.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Sequence
 
 import numpy as np
 
@@ -127,8 +127,12 @@ def cheapest_containing(outcomes: dict[str, SimulationOutcome]) -> str:
 
 
 def _summarise(outcomes: list[SimulationOutcome]) -> dict:
-    contained = [o.time_to_contain_seconds for o in outcomes if o.time_to_contain_seconds is not None]
-    summary = {metric: _band([getattr(o, metric) for o in outcomes]) for metric in METRICS}
+    contained = [
+        o.time_to_contain_seconds for o in outcomes if o.time_to_contain_seconds is not None
+    ]
+    summary: dict[str, dict[str, float] | None] = {
+        metric: _band([getattr(o, metric) for o in outcomes]) for metric in METRICS
+    }
     summary["time_to_contain_seconds"] = _band(contained) if contained else None
     return {"bands": summary, "p_contains": round(len(contained) / len(outcomes), 4)}
 
@@ -178,9 +182,9 @@ def assumption_uncertainty(
             continue
         entry = _summarise([draw[candidate.key] for draw in per_draw])
         entry["policy_name"] = candidate.name
-        entry["stated"] = {
-            metric: getattr(stated[candidate.key], metric) for metric in METRICS
-        } | {"time_to_contain_seconds": stated[candidate.key].time_to_contain_seconds}
+        entry["stated"] = {metric: getattr(stated[candidate.key], metric) for metric in METRICS} | {
+            "time_to_contain_seconds": stated[candidate.key].time_to_contain_seconds
+        }
         entry["basis"] = (
             "past-week thresholds (not sampled)"
             if uses_plan(candidate, policy_plan)
@@ -208,9 +212,7 @@ def assumption_uncertainty(
         # the option driven by past-week thresholds, it has none of its own to
         # vary, so "robust" only says no sampled option beats it: a weaker claim
         # than it sounds, and the reader should be told which one they are getting.
-        leader_sampled = (
-            options[leader]["basis"] == SAMPLED_BASIS if leader in options else None
-        )
+        leader_sampled = options[leader]["basis"] == SAMPLED_BASIS if leader in options else None
         if robust and leader_sampled is False:
             notes.append(
                 "The leading option rests on past-week thresholds, which are not sampled. "

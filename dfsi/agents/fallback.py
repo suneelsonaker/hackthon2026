@@ -104,9 +104,7 @@ def investigate(bundle: EvidenceBundle) -> dict:
     if counter:
         summary_parts.append("Against: " + "; ".join(counter[:2]) + ".")
     if not summary_parts:
-        summary_parts.append(
-            "No strong signal in either direction from the current evidence."
-        )
+        summary_parts.append("No strong signal in either direction from the current evidence.")
 
     return {
         "agent": "investigator",

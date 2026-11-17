@@ -39,9 +39,9 @@ Design rules that keep the synthetic world from handing the model the answer:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
 
 import numpy as np
 
@@ -91,7 +91,7 @@ class RangeProfile:
         return self.base_pps[traffic_type] * _POLICY_HEADROOM
 
     def policy_mbps(self, traffic_type: str) -> float:
-        return _pps_to_mbps(self.policy_pps(traffic_type), traffic_type)
+        return float(_pps_to_mbps(self.policy_pps(traffic_type), traffic_type))
 
 
 def _pps_to_mbps(pps: float | np.ndarray, traffic_type: str) -> float | np.ndarray:
@@ -215,9 +215,7 @@ def _crowd_type_weights(scenario_type: str, rng: np.random.Generator) -> dict[st
     }
 
 
-def _attack_profiles(
-    plan: EpisodePlan, n: int, rng: np.random.Generator
-) -> dict[str, np.ndarray]:
+def _attack_profiles(plan: EpisodePlan, n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
     """Attack packets-per-second per traffic type, per window.
 
     Timing is drawn once per episode so a multi-vector attack starts on every
@@ -283,10 +281,9 @@ def _draw_source_mix(scenario_type: str, rng: np.random.Generator) -> _SourceMix
     only — no addresses are generated or stored.
     """
     normal = float(rng.uniform(0.11, 0.17))
-    if rng.random() < 0.45:
-        crowd = float(rng.uniform(0.32, 0.65))  # regional event
-    else:
-        crowd = float(rng.uniform(0.10, 0.22))  # broad, global demand
+    # A regional event concentrates demand; broad, global demand spreads it.
+    regional = rng.random() < 0.45
+    crowd = float(rng.uniform(0.32, 0.65) if regional else rng.uniform(0.10, 0.22))
     if rng.random() < 0.55:
         attack = float(rng.uniform(0.40, 0.78))  # a few reflector networks
     else:
@@ -307,9 +304,7 @@ def _country_hhi(
     reflection flood does, and a botnet can lower it.
     """
     normal_share = np.clip(1.0 - crowd_share - attack_share, 0.0, 1.0)
-    blended = (
-        mix.normal * normal_share + mix.crowd * crowd_share + mix.attack * attack_share
-    )
+    blended = mix.normal * normal_share + mix.crowd * crowd_share + mix.attack * attack_share
     noise = rng.normal(0.0, 0.012, size=crowd_share.shape[0])
     return np.clip(blended + noise, 0.02, 0.98)
 
@@ -353,9 +348,9 @@ def generate_episode_columns(plan: EpisodePlan) -> dict[str, np.ndarray]:
         put("traffic_type", np.full(n, traffic_type, dtype=object))
         put("window_start_epoch", epoch.astype(np.int64))
         put("total_pps", total_pps)
-        put("total_mbps", _pps_to_mbps(total_pps, traffic_type))
+        put("total_mbps", np.asarray(_pps_to_mbps(total_pps, traffic_type)))
         put("blocked_pps", blocked_pps)
-        put("blocked_mbps", _pps_to_mbps(blocked_pps, traffic_type))
+        put("blocked_mbps", np.asarray(_pps_to_mbps(blocked_pps, traffic_type)))
         put("policy_pps", np.full(n, policy_pps))
         put("policy_mbps", np.full(n, policy_mbps))
         put("country_hhi", hhi)
@@ -371,9 +366,7 @@ def generate_episode_columns(plan: EpisodePlan) -> dict[str, np.ndarray]:
             "range_id": np.full(rows, plan.range_profile.range_id, dtype=np.int64),
             "account_id": np.full(rows, plan.range_profile.account_id, dtype=np.int64),
             "range_type": np.full(rows, plan.range_profile.range_type, dtype=object),
-            "account_attack_history": np.full(
-                rows, plan.account_attack_history, dtype=np.int32
-            ),
+            "account_attack_history": np.full(rows, plan.account_attack_history, dtype=np.int32),
             "week_index": np.full(rows, plan.week_index, dtype=np.int32),
         }
     )
@@ -385,9 +378,7 @@ def generate_episode(plan: EpisodePlan) -> list[dict]:
     columns = generate_episode_columns(plan)
     names = list(columns)
     count = columns["window_start_epoch"].shape[0]
-    return [
-        {name: _python_scalar(columns[name][i]) for name in names} for i in range(count)
-    ]
+    return [{name: _python_scalar(columns[name][i]) for name in names} for i in range(count)]
 
 
 def _python_scalar(value):

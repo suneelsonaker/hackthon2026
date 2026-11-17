@@ -279,6 +279,9 @@ export interface DecisionRecord {
   note: string
   model_version: string
   feature_version: string
+  /** Set only when the dashboard was showing a different model version. */
+  client_model_version?: string | null
+  recommended_policy_key?: string | null
   policy_change: {
     basis: string
     change: string | null

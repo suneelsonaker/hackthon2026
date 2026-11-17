@@ -41,14 +41,14 @@ Pure logic, no I/O; one instance per range.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
-from typing import Sequence
+from enum import StrEnum
 
 from .serve import RiskBands
 
 
-class AlertState(str, Enum):
+class AlertState(StrEnum):
     QUIET = "QUIET"
     #: Elevated but no alert is open: informational, nothing to acknowledge.
     WATCH = "WATCH"
@@ -193,7 +193,9 @@ class AlertLifecycle:
                 event = "cooling"
 
         elif self.state is AlertState.CRITICAL:
-            self._down_run = self._down_run + 1 if score < bands.critical * policy.clear_ratio else 0
+            self._down_run = (
+                self._down_run + 1 if score < bands.critical * policy.clear_ratio else 0
+            )
             self._clear_run = 0 if holds else self._clear_run + 1
             if self._clear_run >= policy.clear_after:
                 self._cool()

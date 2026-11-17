@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +24,13 @@ from ..rehearsal.simulator import CANDIDATES
 _VALUE_DECIMALS = range(0, 5)
 #: The same value read as a percentage ("0.4231" -> "42.31%").
 _PERCENT_DECIMALS = range(0, 3)
+#: A rounded rendering counts as quoting the value only while it stays this
+#: close to it. "0.4231" may be "0.42" or "42%", but 7.4 may not become "7":
+#: without this bound every value donated a nearby integer, and together they
+#: covered most small numbers an agent could invent.
+MAX_ROUNDING_ERROR = 0.05
+
+_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?")
 
 
 def _trim(number: float, decimals: int) -> str:
@@ -48,9 +56,54 @@ def numeric_forms(value: Any) -> set[str]:
     magnitude = abs(float(value))
     if not math.isfinite(magnitude):
         return set()
-    forms = {_trim(magnitude, places) for places in _VALUE_DECIMALS}
-    forms |= {_trim(magnitude * 100.0, places) for places in _PERCENT_DECIMALS}
+    forms = _faithful_roundings(magnitude, _VALUE_DECIMALS)
+    forms |= _faithful_roundings(magnitude * 100.0, _PERCENT_DECIMALS)
     return forms
+
+
+def _faithful_roundings(value: float, places: range) -> set[str]:
+    """Renderings of `value` at each precision that stay within the rounding bound.
+
+    The most precise rendering is always kept, so an exact quote never fails.
+    """
+    forms = {_trim(value, places[-1])}
+    for decimals in places:
+        rounded = round(value, decimals)
+        if value == 0 or abs(rounded - value) / value <= MAX_ROUNDING_ERROR:
+            forms.add(_trim(value, decimals))
+    return forms
+
+
+def _add_value(values: dict[str, list[float]], name: Any, value: Any) -> None:
+    """Record `value` under feature `name`; a name with no usable value still counts."""
+    if not isinstance(name, str):
+        return
+    bucket = values.setdefault(name, [])
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, int | float) and math.isfinite(value):
+        bucket.append(float(value))
+
+
+def _is_timestamp(key: Any) -> bool:
+    """Epoch columns locate a window; they are not figures an explanation quotes."""
+    return isinstance(key, str) and key.endswith("_epoch")
+
+
+def _numbers_in(payload: Any) -> list[Any]:
+    """Every number in a decoded tool payload, including numbers written in its prose."""
+    if isinstance(payload, dict):
+        return [
+            n
+            for key, value in payload.items()
+            if not _is_timestamp(key)
+            for n in _numbers_in(value)
+        ]
+    if isinstance(payload, list):
+        return [n for value in payload for n in _numbers_in(value)]
+    if isinstance(payload, str):
+        return [float(match) for match in _NUMBER.findall(payload)]
+    return [payload]
 
 
 @dataclass
@@ -97,8 +150,9 @@ class EvidenceBundle:
             for key in ("value", "importance", "contribution"):
                 add(item.get(key))
         for row in self.recent_windows:
-            for value in row.values():
-                add(value)
+            for key, value in row.items():
+                if not _is_timestamp(key):
+                    add(value)
         if self.simulation:
             for candidate in self.simulation.get("candidates", []):
                 for value in candidate.values():
@@ -109,6 +163,21 @@ class EvidenceBundle:
             for suggestion in plan.get("per_type", []) or []:
                 for value in suggestion.values():
                     add(value)
+        return values
+
+    def citable_values(self) -> dict[str, list[float]]:
+        """Feature name -> every value of it an agent was shown.
+
+        Drawn from the evidence items and the recent traffic rows, so a
+        citation can be checked against the feature it names, not merely
+        against "some number somewhere in the bundle".
+        """
+        values: dict[str, list[float]] = {}
+        for item in self.evidence:
+            _add_value(values, item.get("feature"), item.get("value"))
+        for row in self.recent_windows:
+            for name, value in row.items():
+                _add_value(values, name, value)
         return values
 
     def newest_evidence_epoch(self) -> int:
@@ -157,9 +226,40 @@ class ReadOnlyToolbox:
     def __init__(self, bundle: EvidenceBundle) -> None:
         self._bundle = bundle
         self.calls: list[dict] = []
+        #: Every payload actually returned to the agent, decoded.
+        self._shown: list[Any] = []
 
     def _record(self, name: str, payload: dict) -> None:
         self.calls.append({"tool": name, "arguments": payload})
+
+    def _reply(self, data: dict) -> str:
+        self._shown.append(data)
+        return json.dumps(data)
+
+    def citable_numbers(self) -> set[str]:
+        """Forms of every number this agent was actually shown.
+
+        The tool replies, plus the three figures its opening message states
+        (range, account, horizon). Tighter than the whole bundle: an agent that
+        never asked for the drill cannot quote the drill's figures.
+        """
+        values: set[str] = set()
+        stated = (self._bundle.range_id, self._bundle.account_id, self._bundle.horizon_seconds)
+        for number in (*stated, *_numbers_in(self._shown)):
+            values |= numeric_forms(number)
+        return values
+
+    def citable_values(self) -> dict[str, list[float]]:
+        """Feature name -> values shown to the agent, for the citation check."""
+        values: dict[str, list[float]] = {}
+        for reply in self._shown:
+            rows = list(reply.get("top_features") or [])
+            for item in rows:
+                _add_value(values, item.get("feature"), item.get("value"))
+            for row in reply.get("windows") or []:
+                for name, value in row.items():
+                    _add_value(values, name, value)
+        return values
 
     def record_denied(self, name: str, arguments: dict | None = None) -> None:
         """Log an attempt to use a tool outside the agent's role.
@@ -174,7 +274,7 @@ class ReadOnlyToolbox:
     def get_forecast_evidence(self) -> str:
         """Return the ranked features behind the current risk score."""
         self._record("get_forecast_evidence", {})
-        return json.dumps(
+        return self._reply(
             {
                 "range_id": self._bundle.range_id,
                 "window_start_epoch": self._bundle.window_start_epoch,
@@ -190,7 +290,7 @@ class ReadOnlyToolbox:
         """Return the most recent traffic windows for this range."""
         limit = max(1, min(int(max_windows), 36))
         self._record("get_recent_traffic", {"max_windows": limit})
-        return json.dumps({"windows": self._bundle.recent_windows[-limit:]})
+        return self._reply({"windows": self._bundle.recent_windows[-limit:]})
 
     def get_source_profile(self) -> str:
         """Return the country-concentration profile and attack history.
@@ -199,7 +299,7 @@ class ReadOnlyToolbox:
         """
         self._record("get_source_profile", {})
         latest = self._bundle.recent_windows[-1] if self._bundle.recent_windows else {}
-        return json.dumps(
+        return self._reply(
             {
                 "country_concentration_index": latest.get("country_hhi"),
                 "country_concentration_change_60s": latest.get("country_hhi_delta_60s"),
@@ -211,7 +311,7 @@ class ReadOnlyToolbox:
     def get_policy_candidates(self) -> str:
         """Return the four fixed response options and their trade-offs."""
         self._record("get_policy_candidates", {})
-        return json.dumps(
+        return self._reply(
             {
                 "candidates": [
                     {
@@ -233,8 +333,8 @@ class ReadOnlyToolbox:
         """Return the rehearsal-room comparison, if a drill has been run."""
         self._record("get_simulation_results", {})
         if not self._bundle.simulation:
-            return json.dumps({"available": False, "reason": "no drill has been run yet"})
-        return json.dumps({"available": True, **self._bundle.simulation})
+            return self._reply({"available": False, "reason": "no drill has been run yet"})
+        return self._reply({"available": True, **self._bundle.simulation})
 
 
 #: Tool names each agent may use. Enforced by the validator, so a model that

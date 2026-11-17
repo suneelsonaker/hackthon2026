@@ -10,6 +10,7 @@ checked against random score series, gaps included.
 
 from __future__ import annotations
 
+import itertools
 import random
 
 import pytest
@@ -108,7 +109,7 @@ def test_the_bare_debounce_flickers_on_the_same_series():
     """What the lifecycle exists to fix: the same scores, one light blinking."""
     tracker = AlertTracker(2)
     active = [tracker.update(score >= BANDS.warn) for score in HOVERING]
-    drops = sum(1 for before, now in zip(active, active[1:]) if before and not now)
+    drops = sum(1 for before, now in itertools.pairwise(active) if before and not now)
     assert drops >= 6
 
 
@@ -342,7 +343,9 @@ def test_an_unbacked_relapse_does_not_reopen_an_alert():
 def test_evidence_defaults_to_present():
     """Callers that predate the gate behave exactly as before."""
     plain = AlertLifecycle(BANDS, LifecyclePolicy())
-    assert [plain.update(i * 10, s).state for i, s in enumerate([WARN, WARN, WARN])] == states(run([WARN] * 3))
+    assert [plain.update(i * 10, s).state for i, s in enumerate([WARN, WARN, WARN])] == states(
+        run([WARN] * 3)
+    )
 
 
 def test_the_first_alert_still_matches_the_debounce_once_evidence_is_required():

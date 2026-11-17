@@ -12,13 +12,12 @@ and the evaluator must agree on *when* the warning was raised.
 
 from __future__ import annotations
 
-import importlib
 import random
 
 import pandas as pd
 import pytest
+from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, TRAFFIC_TYPES, make_row, make_services
 
-from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, TRAFFIC_TYPES, make_row
 from dfsi.api import replay as replay_engine
 from dfsi.config import STATE_ABOUT_TO_START, STATE_MONITORING_ONLY
 from dfsi.forecaster.alerting import AlertTracker, first_alert_index
@@ -60,7 +59,13 @@ def test_tracker_is_active_while_the_run_continues_and_drops_when_it_breaks():
     tracker = AlertTracker(min_consecutive=2)
     flags = [False, True, True, True, False, True, True]
     assert [tracker.update(flag) for flag in flags] == [
-        False, False, True, True, False, False, True,
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        True,
     ]
 
 
@@ -163,7 +168,11 @@ def test_two_in_a_row_warn_at_the_second_and_stay_warned():
     state, events = stream([0.1, 0.9, 0.9, 0.9, 0.1])
 
     assert [e["dfsi_state"] for e in events] == [
-        "QUIET", "QUIET", STATE_ABOUT_TO_START, STATE_ABOUT_TO_START, "QUIET",
+        "QUIET",
+        "QUIET",
+        STATE_ABOUT_TO_START,
+        STATE_ABOUT_TO_START,
+        "QUIET",
     ]
     assert [e["forecast"]["predicted_state"] for e in events] == [e["dfsi_state"] for e in events]
     assert state.first_warning_epoch == EPOCH + 20
@@ -225,16 +234,22 @@ def test_the_stream_and_the_evaluator_agree_on_when_the_warning_was_raised():
 
 
 @pytest.fixture
-def api(monkeypatch):
-    # `dfsi.api.app` the attribute is the FastAPI object; we want the module.
-    return importlib.import_module("dfsi.api.app")
+def api(tmp_path):
+    """Builds services around a scripted forecaster; `api(scores)` -> DfsiServices."""
+
+    def build(scores, min_consecutive: int = 2):
+        replay = make_replay(len(scores))
+        return make_services(
+            tmp_path,
+            forecaster=ScriptedForecaster(scores, min_consecutive),
+            load_stored_replay=lambda replay_id: replay,
+        )
+
+    return build
 
 
 def resolve(api, monkeypatch, scores, min_consecutive: int = 2):
-    replay = make_replay(len(scores))
-    monkeypatch.setattr(api, "_forecaster", ScriptedForecaster(scores, min_consecutive))
-    monkeypatch.setattr(api.replay_engine, "load_replay", lambda replay_id: replay)
-    return api._replay_and_decision_epoch("scripted", None)[1]
+    return api(scores, min_consecutive).resolve_decision_epoch("scripted", None)[1]
 
 
 def test_the_default_decision_epoch_is_the_window_the_dashboard_warned_at(api, monkeypatch):

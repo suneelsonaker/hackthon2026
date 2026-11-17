@@ -15,9 +15,8 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
-from ..config import PATHS, STATE_ABOUT_TO_START, STATE_MONITORING_ONLY
+from ..config import PATHS, STATE_ABOUT_TO_START, STATE_MONITORING_ONLY, Paths
 from ..forecaster.alerting import AlertTracker
 from ..forecaster.lifecycle import AlertLifecycle, LifecyclePolicy
 from ..forecaster.serve import ForecasterService, RiskBands
@@ -46,25 +45,25 @@ class ReplayCatalogueEntry:
         }
 
 
-def load_catalogue() -> list[ReplayCatalogueEntry]:
-    path = PATHS.replay / "catalogue.json"
+def load_catalogue(paths: Paths = PATHS) -> list[ReplayCatalogueEntry]:
+    path = paths.replay / "catalogue.json"
     if not path.exists():
         return []
     raw = json.loads(path.read_text())
     return [ReplayCatalogueEntry(**entry) for entry in raw]
 
 
-def load_replay(replay_id: str) -> dict:
+def load_replay(replay_id: str, paths: Paths = PATHS) -> dict:
     """Load one stored replay, rejecting anything that is not a known id.
 
     `replay_id` arrives from an HTTP path parameter, so it is validated against
     the catalogue rather than interpolated into a path — otherwise
     `../../etc/passwd` would be a valid replay name.
     """
-    known = {entry.replay_id for entry in load_catalogue()}
+    known = {entry.replay_id for entry in load_catalogue(paths)}
     if replay_id not in known:
         raise KeyError(replay_id)
-    path: Path = PATHS.replay / f"{replay_id}.json"
+    path: Path = paths.replay / f"{replay_id}.json"
     if not path.exists():
         raise KeyError(replay_id)
     return json.loads(path.read_text())
@@ -115,9 +114,7 @@ def build_state(replay: dict) -> ReplayState:
     )
 
 
-def step(
-    state: ReplayState, forecaster: ForecasterService, threshold: float | None = None
-) -> dict:
+def step(state: ReplayState, forecaster: ForecasterService, threshold: float | None = None) -> dict:
     """Advance the replay by one 10-second window and return the event.
 
     `threshold` is the range's decision threshold from raw.json (`None`: the
@@ -224,9 +221,7 @@ def _aggregate(rows: list[dict]) -> dict:
         "blocked_share": round(blocked_pps / total_pps, 4) if total_pps else 0.0,
         "policy_utilisation": round(total_pps / policy_pps, 4) if policy_pps else 0.0,
         "dominant_traffic_type": strongest.get("traffic_type"),
-        "baseline_deviation_pps": round(
-            float(strongest.get("baseline_deviation_pps", 0.0)), 2
-        ),
+        "baseline_deviation_pps": round(float(strongest.get("baseline_deviation_pps", 0.0)), 2),
         "country_hhi": round(float(strongest.get("country_hhi", 0.0)), 4),
         "per_traffic_type": [
             {
@@ -277,20 +272,3 @@ def run_stats(state: ReplayState) -> dict:
             state.first_warning_epoch - start if state.first_warning_epoch is not None else None
         ),
     }
-
-
-def flat_history(state: ReplayState) -> list[dict]:
-    """The lookback window, flattened, for the evidence bundle."""
-    rows: list[dict] = []
-    for bucket in state.history:
-        rows.extend(bucket)
-    return rows
-
-
-def iter_replay(
-    replay_id: str, forecaster: ForecasterService, threshold: float | None = None
-) -> Iterator[tuple[ReplayState, dict]]:
-    """Walk an entire replay, yielding the state and each event."""
-    state = build_state(load_replay(replay_id))
-    while not state.finished:
-        yield state, step(state, forecaster, threshold)

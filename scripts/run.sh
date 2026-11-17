@@ -22,6 +22,7 @@ RUN_TESTS=0
 START_UI=1
 SERVE=1
 MEMORY_ARGS=""
+TRAIN_ARGS=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,7 +34,10 @@ while [ $# -gt 0 ]; do
     # itself rather than tripping `set -u` on $2.
     --days|--env)
       [ $# -ge 2 ] || { echo "run.sh: $1 needs a value" >&2; exit 2; }
-      MEMORY_ARGS="$MEMORY_ARGS $1 $2"; shift ;;
+      MEMORY_ARGS="$MEMORY_ARGS $1 $2"
+      # The time split needs four weeks (warm-up, fit, calibration, test).
+      if [ "$1" = --days ] && [ "$2" -lt 28 ]; then TRAIN_ARGS="--split scenario"; fi
+      shift ;;
     -h|--help)    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "run.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -67,7 +71,7 @@ fi
 
 # shellcheck source=scripts/env.sh
 . scripts/env.sh
-echo "==> JAVA_HOME=$JAVA_HOME"
+echo "==> JAVA_HOME=${JAVA_HOME:-none (only needed to build Memory)}"
 echo "==> DFSI_HOME=$DFSI_HOME"
 
 # -------------------------------------------------------------------- 2. UI deps
@@ -92,7 +96,7 @@ fi
 if [ "$REBUILD" = 1 ] \
   || [ ! -f "$DFSI_HOME/data/features/_SUCCESS" ] \
   || [ ! -f "$DFSI_HOME/data/replay/catalogue.json" ]; then
-  echo "==> Memory layer: PySpark over the logbook (~1-2 min)"
+  echo "==> Memory layer: PySpark over the logbook (~20 min for 28 days)"
   # shellcheck disable=SC2086  # MEMORY_ARGS is a deliberate word list
   scripts/build_memory.sh $MEMORY_ARGS
 else
@@ -102,7 +106,8 @@ fi
 # ----------------------------------------------------------------- 4. Forecaster
 if [ "$REBUILD" = 1 ] || [ ! -f "$DFSI_HOME/models/forecaster.pkl" ]; then
   echo "==> Forecaster: train, calibrate, register in MLflow"
-  scripts/train.sh
+  # shellcheck disable=SC2086  # TRAIN_ARGS is a deliberate word list
+  scripts/train.sh $TRAIN_ARGS
 else
   echo "==> Model present; skipping (--rebuild to force)"
 fi

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
-
 from conftest import requires_memory
+
 from dfsi.config import PATHS
 from dfsi.forecaster.train import (
     FORBIDDEN_INPUTS,
@@ -151,24 +152,25 @@ def test_split_bookkeeping_is_forbidden_as_input():
 
 @requires_memory
 def test_built_feature_table_has_no_forbidden_input_in_the_vector():
-    frame = pd.read_parquet(PATHS.features)
+    # The schema alone: no need to load ~20M rows to read column names.
+    columns = set(pq.read_schema(next(PATHS.features.glob("*.parquet"))).names)
     assert_no_leakage(list(FEATURE_COLUMNS))
     for column in FEATURE_COLUMNS:
-        assert column in frame.columns, column
+        assert column in columns, column
 
 
 @requires_memory
 def test_built_features_are_finite():
     """A NaN or infinity here would silently become a split point in the trees."""
-    frame = pd.read_parquet(PATHS.features)
-    values = frame[list(FEATURE_COLUMNS)].to_numpy(dtype=float)
+    frame = pd.read_parquet(PATHS.features, columns=list(FEATURE_COLUMNS))
+    values = frame.to_numpy(dtype=float)
     assert np.isfinite(values).all()
 
 
 @requires_memory
 def test_label_is_rare_and_present():
     """Onsets are a fraction of a percent; a label that is common is a bug."""
-    frame = pd.read_parquet(PATHS.features)
+    frame = pd.read_parquet(PATHS.features, columns=[LABEL_COLUMN])
     rate = frame[LABEL_COLUMN].mean()
     assert 0.0 < rate < 0.05, f"positive rate {rate:.4%} is implausible"
 
@@ -184,16 +186,18 @@ def test_every_labelled_window_sits_inside_the_horizon_before_an_onset():
     present; a window more than 120 seconds ahead would mean it is not a
     120-second forecast.
     """
-    frame = pd.read_parquet(PATHS.features)
+    frame = pd.read_parquet(
+        PATHS.features, columns=[GROUP_COLUMN, "window_start_epoch", "is_onset", LABEL_COLUMN]
+    )
     onsets = {
         scenario_id: sorted(set(group))
-        for scenario_id, group in frame[frame["is_onset"] == 1]
-        .groupby(GROUP_COLUMN)["window_start_epoch"]
+        for scenario_id, group in frame[frame["is_onset"] == 1].groupby(GROUP_COLUMN)[
+            "window_start_epoch"
+        ]
     }
-    labelled = (
-        frame[frame[LABEL_COLUMN] == 1][[GROUP_COLUMN, "window_start_epoch"]]
-        .drop_duplicates()
-    )
+    labelled = frame[frame[LABEL_COLUMN] == 1][
+        [GROUP_COLUMN, "window_start_epoch"]
+    ].drop_duplicates()
     assert not labelled.empty, "no positive labels at all"
 
     leads: list[int] = []
@@ -223,10 +227,10 @@ def test_declared_requires_the_full_start_duration():
     from dfsi.config import thresholds_for
 
     required = thresholds_for().start_duration_windows
-    frame = pd.read_parquet(PATHS.features)
-    per_instant = frame[
-        [GROUP_COLUMN, "window_start_epoch", "range_over_threshold", "declared"]
-    ].drop_duplicates()
+    per_instant = pd.read_parquet(
+        PATHS.features,
+        columns=[GROUP_COLUMN, "window_start_epoch", "range_over_threshold", "declared"],
+    ).drop_duplicates()
 
     for _, group in per_instant.groupby(GROUP_COLUMN):
         group = group.sort_values("window_start_epoch")
@@ -254,9 +258,7 @@ def test_every_baseline_is_built_from_earlier_weeks_only():
     )
     assert not baselines.empty
     assert (baselines["source_week_max"] < baselines["week_index"]).all()
-    assert (
-        baselines["source_week_min"] >= baselines["week_index"] - BASELINE_LOOKBACK_WEEKS
-    ).all()
+    assert (baselines["source_week_min"] >= baselines["week_index"] - BASELINE_LOOKBACK_WEEKS).all()
 
 
 @requires_memory
@@ -279,12 +281,21 @@ def test_the_warm_up_week_never_reaches_the_feature_table():
 def test_positive_labels_sit_on_a_vector_that_carries_the_onset():
     """Per-type label: a quiet vector's row is never asked to predict an onset
     its own features cannot see."""
-    columns = [GROUP_COLUMN, "traffic_type", "window_start_epoch", "is_onset", "over_threshold", LABEL_COLUMN]
+    columns = [
+        GROUP_COLUMN,
+        "traffic_type",
+        "window_start_epoch",
+        "is_onset",
+        "over_threshold",
+        LABEL_COLUMN,
+    ]
     frame = pd.read_parquet(PATHS.features, columns=columns)
     carriers = frame[(frame["is_onset"] == 1) & (frame["over_threshold"] == 1)][
         [GROUP_COLUMN, "traffic_type", "window_start_epoch"]
     ].rename(columns={"window_start_epoch": "onset_epoch"})
-    positives = frame[frame[LABEL_COLUMN] == 1][[GROUP_COLUMN, "traffic_type", "window_start_epoch"]]
+    positives = frame[frame[LABEL_COLUMN] == 1][
+        [GROUP_COLUMN, "traffic_type", "window_start_epoch"]
+    ]
     assert not positives.empty
 
     paired = positives.merge(carriers, on=[GROUP_COLUMN, "traffic_type"], how="left")
@@ -301,7 +312,9 @@ def test_demo_replays_come_from_the_held_out_week():
 
     from dfsi.config import TEST_WEEKS
 
-    feature_weeks = sorted(set(pd.read_parquet(PATHS.features, columns=["week_index"])["week_index"]))
+    feature_weeks = sorted(
+        set(pd.read_parquet(PATHS.features, columns=["week_index"])["week_index"])
+    )
     test_weeks = set(feature_weeks[-TEST_WEEKS:])
     catalogue = json.loads((PATHS.replay / "catalogue.json").read_text())
     assert catalogue

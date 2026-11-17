@@ -9,7 +9,7 @@ or its "decide now" row would disagree with the drill sitting next to it.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from .simulator import (
     PolicyCandidate,

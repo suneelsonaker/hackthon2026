@@ -34,9 +34,9 @@ type, attack vector) — a production advisor would not have them.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -168,7 +168,7 @@ def _nice_ceil(value: float) -> float:
     """Round up to two significant figures: 21_437 -> 22_000."""
     if value <= 0:
         return 0.0
-    scale = 10 ** (int(math.floor(math.log10(value))) - 1)
+    scale = 10 ** (math.floor(math.log10(value)) - 1)
     return float(math.ceil(value / scale) * scale)
 
 
@@ -259,7 +259,9 @@ def suggest_policy(
         clean_pps = clean["total_pps"].to_numpy(dtype=float)
 
         epochs = clean["window_start_epoch"].to_numpy()
-        keys = pd.DataFrame({"weekend": _is_weekend(epochs), "hour": _hour(epochs), "pps": clean_pps})
+        keys = pd.DataFrame(
+            {"weekend": _is_weekend(epochs), "hour": _hour(epochs), "pps": clean_pps}
+        )
         for (weekend, hour), median in keys.groupby(["weekend", "hour"])["pps"].median().items():
             reference[(traffic_type, bool(weekend), int(hour))] = float(median)
 
@@ -281,7 +283,11 @@ def suggest_policy(
         hit_hours = set(group_hours[hit].tolist())
 
         normal_now = reference.get(
-            (traffic_type, _is_weekend(int(now["window_start_epoch"])), int(_hour(int(now["window_start_epoch"]))))
+            (
+                traffic_type,
+                _is_weekend(int(now["window_start_epoch"])),
+                int(_hour(int(now["window_start_epoch"]))),
+            )
         )
         ratio_now = float(now["total_pps"]) / normal_now if normal_now else 1.0
 

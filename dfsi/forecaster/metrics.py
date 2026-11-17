@@ -141,9 +141,7 @@ def scenario_outcomes(
         }
         if has_over_column:
             aggregations["over_threshold"] = ("range_over_threshold", "max")
-        per_window = (
-            group.groupby("window_start_epoch").agg(**aggregations).sort_index()
-        )
+        per_window = group.groupby("window_start_epoch").agg(**aggregations).sort_index()
         above = (per_window["score"] >= threshold).to_numpy()
         epochs = per_window.index.to_numpy()
 
@@ -156,9 +154,7 @@ def scenario_outcomes(
         # Already over threshold in the opening window: the episode starts
         # mid-attack, so there is nothing to forecast from.
         in_progress = bool(
-            has_over_column
-            and len(per_window)
-            and per_window["over_threshold"].iloc[0] > 0
+            has_over_column and len(per_window) and per_window["over_threshold"].iloc[0] > 0
         )
 
         outcomes.append(
@@ -195,9 +191,7 @@ def evaluate(
     late = len(leads) - len(useful)
 
     caught = len(useful) / len(forecastable) if forecastable else 0.0
-    detected = (
-        sum(1 for o in in_progress if o.warned) / len(in_progress) if in_progress else 0.0
-    )
+    detected = sum(1 for o in in_progress if o.warned) / len(in_progress) if in_progress else 0.0
     false_alarms = sum(1 for o in quiet if o.warned) / len(quiet) if quiet else 0.0
 
     return EvaluationResult(

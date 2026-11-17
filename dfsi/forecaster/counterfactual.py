@@ -27,7 +27,7 @@ Pure and model-agnostic: it takes a `predict` function and plain numbers.
 from __future__ import annotations
 
 import math
-from typing import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -131,7 +131,7 @@ def find_counterfactual(
     # ---- joint: reset the strongest drivers together, one more at a time ----
     candidates = tried[:max_set]
     batch = np.tile(base, (len(candidates), 1))
-    for k, name in enumerate(candidates):
+    for k in range(len(candidates)):
         for earlier in candidates[: k + 1]:
             batch[k, index[earlier]] = reference[earlier]
     joint_scores = np.asarray(predict(batch), dtype=float)

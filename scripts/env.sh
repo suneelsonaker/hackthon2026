@@ -25,25 +25,40 @@ export DFSI_ROOT
 export DFSI_HOME="${DFSI_HOME:-$DFSI_ROOT}"
 export PYTHON_BIN="${PYTHON_BIN:-$DFSI_ROOT/.venv/bin/python}"
 
-if [[ -z "${JAVA_HOME:-}" ]] || ! "${JAVA_HOME}/bin/java" -version 2>&1 | grep -qE '"(1\.8|11|17|21)'; then
+# True when $1 is a JDK home whose major version is 11, 17 or 21. JDK 8 is
+# rejected too: it starts, then fails inside Spark with an opaque Py4J error.
+_dfsi_jdk_ok() {
+  [[ -n "$1" && -x "$1/bin/java" ]] &&
+    "$1/bin/java" -version 2>&1 | grep -qE 'version "(11|17|21)[."]'
+}
+
+if ! _dfsi_jdk_ok "${JAVA_HOME:-}"; then
+  [[ -n "${JAVA_HOME:-}" ]] &&
+    echo "DFSI: ignoring JAVA_HOME=$JAVA_HOME (not JDK 11/17/21)" >&2
+  unset JAVA_HOME
   for candidate in \
     "$(/usr/libexec/java_home -v 17 2>/dev/null || true)" \
     "$(/usr/libexec/java_home -v 21 2>/dev/null || true)" \
-    "$(/usr/libexec/java_home -v 11 2>/dev/null || true)"; do
-    if [[ -n "$candidate" && -x "$candidate/bin/java" ]]; then
+    "$(/usr/libexec/java_home -v 11 2>/dev/null || true)" \
+    /opt/homebrew/opt/openjdk@17 /usr/local/opt/openjdk@17 \
+    /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/java-17-openjdk-arm64; do
+    if _dfsi_jdk_ok "$candidate"; then
       export JAVA_HOME="$candidate"
       break
     fi
   done
 fi
 
-if [[ -z "${JAVA_HOME:-}" ]]; then
-  echo "DFSI: no JDK 11/17/21 found. PySpark 3.5 does not support JDK 23+." >&2
-  echo "      Install one, e.g. 'brew install openjdk@17'." >&2
+unset -f _dfsi_jdk_ok
+
+# Only the Memory stage (PySpark) needs a JDK; build_memory.sh sets
+# DFSI_REQUIRE_JDK=1. Training, the API and the UI run without one.
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
+elif [[ "${DFSI_REQUIRE_JDK:-0}" == "1" ]]; then
+  echo "DFSI: no JDK 11/17/21 found. PySpark 3.5 runs on neither JDK 8 nor 23+." >&2
+  echo "      Install one, e.g. 'brew install openjdk@17', or set JAVA_HOME." >&2
   exit 1
 fi
-
-export PATH="$JAVA_HOME/bin:$PATH"
-# Spark on recent JDKs needs these opens for its unsafe memory access.
 export PYSPARK_PYTHON="$PYTHON_BIN"
 export PYSPARK_DRIVER_PYTHON="$PYTHON_BIN"

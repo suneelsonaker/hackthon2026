@@ -87,7 +87,7 @@ REPLAY_COLUMNS = (
 )
 
 
-def run(days: int = 28, environment: str | None = None, replay_per_type: int = 2) -> dict:
+def run(days: int = 28, environment: str | None = None, replay_per_type: int | None = None) -> dict:
     """Build the whole Memory layer. Returns a summary dict."""
     thresholds = thresholds_for(environment)
     for directory in (PATHS.raw_windows, PATHS.baselines, PATHS.features, PATHS.replay):
@@ -177,7 +177,29 @@ def _write_raw_windows(plans: list[EpisodePlan]) -> int:
     return total
 
 
-def _write_replays(features, per_type: int, weeks: list[int]) -> None:
+def choose_replays(rows: list, per_type: int | None, prefer_onset: bool) -> list:
+    """Pick up to `per_type` scenarios of one family, spread across accounts, then ranges.
+
+    `rows` need `scenario_id`, `range_id`, `account_id` and `has_onset`. With
+    `per_type=None`, one per account. Attack families put scenarios whose
+    bell actually rings first. Deterministic: ties break on `scenario_id`.
+    """
+    limit = per_type if per_type is not None else len({r["account_id"] for r in rows})
+    ordered = sorted(rows, key=lambda r: (prefer_onset and not r["has_onset"], r["scenario_id"]))
+    bucket: list = []
+    for spread in ("account_id", "range_id"):  # one per account, then one per range
+        seen = {r[spread] for r in bucket}
+        for row in ordered:
+            if len(bucket) < limit and row[spread] not in seen and row not in bucket:
+                bucket.append(row)
+                seen.add(row[spread])
+    for row in ordered:  # then fill
+        if len(bucket) < limit and row not in bucket:
+            bucket.append(row)
+    return bucket
+
+
+def _write_replays(features, per_type: int | None, weeks: list[int]) -> None:
     """Export a handful of complete scenarios as JSON for the UI replay.
 
     One replay = every window of one episode for one range, ordered in time,
@@ -185,8 +207,9 @@ def _write_replays(features, per_type: int, weeks: list[int]) -> None:
 
     Replays come from the held-out test week(s) only, so the demo never shows
     the model a scenario it was fitted or calibrated on. Within a family,
-    attack replays that actually ring the bell come first, and ranges are
-    spread before any range repeats.
+    attack replays that actually ring the bell come first, and accounts, then
+    ranges, are spread before any repeats — so the dashboard can offer every
+    account. `per_type=None` (the default) means one replay per account.
     """
     PATHS.replay.mkdir(parents=True, exist_ok=True)
     for stale in PATHS.replay.glob("*.json"):
@@ -195,7 +218,7 @@ def _write_replays(features, per_type: int, weeks: list[int]) -> None:
 
     picks = (
         features.filter(F.col("week_index").isin(weeks))
-        .groupBy("scenario_id", "scenario_type", "range_id")
+        .groupBy("scenario_id", "scenario_type", "range_id", "account_id")
         .agg(F.max(LABEL_COLUMN).alias("has_onset"))
         .collect()
     )
@@ -203,23 +226,12 @@ def _write_replays(features, per_type: int, weeks: list[int]) -> None:
     for row in picks:
         candidates[row["scenario_type"]].append(row)
 
-    chosen: dict[str, list] = {}
-    for scenario_type, rows in sorted(candidates.items()):
-        prefer_onset = scenario_type in ATTACK_SCENARIOS
-        ordered = sorted(
-            rows,
-            key=lambda r: (prefer_onset and not r["has_onset"], r["scenario_id"]),
+    chosen = {
+        scenario_type: choose_replays(
+            rows, per_type, prefer_onset=scenario_type in ATTACK_SCENARIOS
         )
-        bucket: list = []
-        seen_ranges: set[int] = set()
-        for row in ordered:  # first pass: one per range
-            if len(bucket) < per_type and row["range_id"] not in seen_ranges:
-                bucket.append(row)
-                seen_ranges.add(row["range_id"])
-        for row in ordered:  # then fill
-            if len(bucket) < per_type and row not in bucket:
-                bucket.append(row)
-        chosen[scenario_type] = bucket
+        for scenario_type, rows in sorted(candidates.items())
+    }
 
     for scenario_type, rows in chosen.items():
         for row in rows:
@@ -267,7 +279,12 @@ def main() -> None:
         help="days of history; the first week is baseline warm-up only",
     )
     parser.add_argument("--env", default=None, help="stage (default) or prod thresholds")
-    parser.add_argument("--replay-per-type", type=int, default=2)
+    parser.add_argument(
+        "--replay-per-type",
+        type=int,
+        default=None,
+        help="replays per scenario type (default: one per account, so every account is offered)",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     summary = run(days=args.days, environment=args.env, replay_per_type=args.replay_per_type)

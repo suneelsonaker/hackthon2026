@@ -9,8 +9,8 @@ sampler is measuring something other than the drill it sits beside.
 from __future__ import annotations
 
 import pytest
-
 from conftest import EPOCH, attack_windows, quiet_windows
+
 from dfsi.rehearsal.policy_advisor import PolicyPlan, TypeSuggestion, _hour, _is_weekend
 from dfsi.rehearsal.simulator import CANDIDATES_BY_KEY, SimulationOutcome, simulate
 from dfsi.rehearsal.uncertainty import (
@@ -44,11 +44,22 @@ def test_no_spread_collapses_onto_the_plain_drill_exactly():
     report = run(spread=ZERO, draws=5)
     for key in REAL_OPTIONS:
         plain = simulate(FLOOD, DECISION, CANDIDATES_BY_KEY[key])
-        for metric in ("attack_packets_blocked_pct", "legitimate_packets_lost_pct",
-                       "seconds_over_threshold", "peak_blocked_share"):
+        for metric in (
+            "attack_packets_blocked_pct",
+            "legitimate_packets_lost_pct",
+            "seconds_over_threshold",
+            "peak_blocked_share",
+        ):
             band = report["options"][key]["bands"][metric]
-            assert band["p10"] == band["p50"] == band["p90"] == pytest.approx(getattr(plain, metric), abs=1e-3)
-        assert report["options"][key]["p_contains"] == (1.0 if plain.time_to_contain_seconds is not None else 0.0)
+            assert (
+                band["p10"]
+                == band["p50"]
+                == band["p90"]
+                == pytest.approx(getattr(plain, metric), abs=1e-3)
+            )
+        assert report["options"][key]["p_contains"] == (
+            1.0 if plain.time_to_contain_seconds is not None else 0.0
+        )
 
 
 def test_the_same_seed_gives_the_same_bands_and_a_different_seed_does_not():
@@ -66,11 +77,19 @@ def test_bands_are_ordered_and_hold_is_not_sampled():
 
 
 def test_a_wider_spread_widens_the_bands():
-    narrow = run(spread=AssumptionSpread(suppression_sd=0.02, collateral_sigma=0.05, delay_jitter_windows=0))
-    wide = run(spread=AssumptionSpread(suppression_sd=0.25, collateral_sigma=0.6, delay_jitter_windows=0))
+    narrow = run(
+        spread=AssumptionSpread(suppression_sd=0.02, collateral_sigma=0.05, delay_jitter_windows=0)
+    )
+    wide = run(
+        spread=AssumptionSpread(suppression_sd=0.25, collateral_sigma=0.6, delay_jitter_windows=0)
+    )
     for key in REAL_OPTIONS:
-        assert width(wide, key, "attack_packets_blocked_pct") > width(narrow, key, "attack_packets_blocked_pct")
-        assert width(wide, key, "legitimate_packets_lost_pct") > width(narrow, key, "legitimate_packets_lost_pct")
+        assert width(wide, key, "attack_packets_blocked_pct") > width(
+            narrow, key, "attack_packets_blocked_pct"
+        )
+        assert width(wide, key, "legitimate_packets_lost_pct") > width(
+            narrow, key, "legitimate_packets_lost_pct"
+        )
 
 
 def test_the_stated_outcome_sits_inside_the_bands():
@@ -107,10 +126,17 @@ def test_a_recommendation_that_flips_is_not_called_robust():
 
 def outcome(key: str, lost: float, contain: int | None) -> SimulationOutcome:
     return SimulationOutcome(
-        policy_key=key, policy_name=key, attack_packets_blocked_pct=50.0,
-        legitimate_packets_lost_pct=lost, peak_blocked_share=0.1, seconds_over_threshold=0,
-        time_to_contain_seconds=contain, operational_cost="low", blast_radius="x",
-        reversible_seconds=0, engagement_delay_seconds=0,
+        policy_key=key,
+        policy_name=key,
+        attack_packets_blocked_pct=50.0,
+        legitimate_packets_lost_pct=lost,
+        peak_blocked_share=0.1,
+        seconds_over_threshold=0,
+        time_to_contain_seconds=contain,
+        operational_cost="low",
+        blast_radius="x",
+        reversible_seconds=0,
+        engagement_delay_seconds=0,
     )
 
 
@@ -160,12 +186,20 @@ def test_the_win_rule_is_the_offline_advisors_rule_on_a_flood_several_options_co
 
     moderate = attack_windows(count=40, onset_index=6, peak_pps=80_000.0)
     outcomes = {c.key: simulate(moderate, DECISION, c) for c in CANDIDATES}
-    containing = [k for k, o in outcomes.items() if k != "hold" and o.time_to_contain_seconds is not None]
+    containing = [
+        k for k, o in outcomes.items() if k != "hold" and o.time_to_contain_seconds is not None
+    ]
     assert len(containing) >= 2, "fixture must make the choice non-trivial"
 
     bundle = EvidenceBundle(
-        range_id=1, account_id=1, window_start_epoch=DECISION, risk_score=0.9, risk_band="critical",
-        model_version="t", feature_version="t", horizon_seconds=120,
+        range_id=1,
+        account_id=1,
+        window_start_epoch=DECISION,
+        risk_score=0.9,
+        risk_band="critical",
+        model_version="t",
+        feature_version="t",
+        horizon_seconds=120,
         simulation=run_drill(moderate, DECISION),
     )
     advised = fallback.advise(bundle, "attack")["recommended_policy_key"]
@@ -196,15 +230,32 @@ def test_when_nothing_crosses_the_threshold_there_is_no_winner_to_report():
 
 def make_plan() -> PolicyPlan:
     udp = TypeSuggestion(
-        traffic_type="udp", current_policy_pps=40_000.0, current_policy_mbps=0.0,
-        legit_median_pps=10_000.0, legit_envelope_pps=14_000.0, legit_max_pps=15_000.0,
-        suggested_policy_pps=20_000.0, suggested_policy_mbps=0.0, change_pct=-0.5,
-        changes=True, ratio_to_normal_now=8.0, suspect=True, apply=True,
-        backtest_windows_blocked=0, backtest_hours_affected=0, backtest_legit_lost_pct=0.0,
+        traffic_type="udp",
+        current_policy_pps=40_000.0,
+        current_policy_mbps=0.0,
+        legit_median_pps=10_000.0,
+        legit_envelope_pps=14_000.0,
+        legit_max_pps=15_000.0,
+        suggested_policy_pps=20_000.0,
+        suggested_policy_mbps=0.0,
+        change_pct=-0.5,
+        changes=True,
+        ratio_to_normal_now=8.0,
+        suspect=True,
+        apply=True,
+        backtest_windows_blocked=0,
+        backtest_hours_affected=0,
+        backtest_legit_lost_pct=0.0,
     )
     return PolicyPlan(
-        available=True, range_id=90110001, history_days=7.0, per_type=[udp],
-        _reference={("udp", _is_weekend(EPOCH + dt), _hour(EPOCH + dt)): 10_000.0 for dt in range(0, 7200, 3600)},
+        available=True,
+        range_id=90110001,
+        history_days=7.0,
+        per_type=[udp],
+        _reference={
+            ("udp", _is_weekend(EPOCH + dt), _hour(EPOCH + dt)): 10_000.0
+            for dt in range(0, 7200, 3600)
+        },
     )
 
 
@@ -225,8 +276,14 @@ def test_the_plan_driven_stated_outcome_is_the_one_the_drill_reports():
     drill = {c["policy_key"]: c for c in run_drill(FLOOD, DECISION, None, plan)["candidates"]}
     report = assumption_uncertainty(FLOOD, DECISION, policy_plan=plan, draws=10)
     stated = report["options"]["tighten_vector"]["stated"]
-    assert stated["attack_packets_blocked_pct"] == drill["tighten_vector"]["attack_packets_blocked_pct"]
-    assert stated["legitimate_packets_lost_pct"] == drill["tighten_vector"]["legitimate_packets_lost_pct"]
+    assert (
+        stated["attack_packets_blocked_pct"]
+        == drill["tighten_vector"]["attack_packets_blocked_pct"]
+    )
+    assert (
+        stated["legitimate_packets_lost_pct"]
+        == drill["tighten_vector"]["legitimate_packets_lost_pct"]
+    )
 
 
 # ----------------------------------------------------------------- inputs
@@ -238,7 +295,9 @@ def test_a_draw_count_out_of_range_is_rejected(draws):
         assumption_uncertainty(FLOOD, DECISION, draws=draws)
 
 
-@pytest.mark.parametrize("bad", [dict(suppression_sd=-0.1), dict(collateral_sigma=-1), dict(delay_jitter_windows=-1)])
+@pytest.mark.parametrize(
+    "bad", [dict(suppression_sd=-0.1), dict(collateral_sigma=-1), dict(delay_jitter_windows=-1)]
+)
 def test_a_negative_spread_is_rejected(bad):
     with pytest.raises(ValueError):
         AssumptionSpread(**bad)

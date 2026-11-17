@@ -8,6 +8,7 @@ is a specific way an agent could mislead an operator mid-incident.
 from __future__ import annotations
 
 from conftest import ACCOUNT_ID, EPOCH, RANGE_ID
+
 from dfsi.agents.validator import (
     MAX_EVIDENCE_AGE_SECONDS,
     ValidationReport,
@@ -83,9 +84,7 @@ def test_output_about_another_range_is_rejected():
 
 def test_output_about_another_account_is_rejected():
     report = ValidationReport(passed=True)
-    check_tenant_scope(
-        {"range_id": RANGE_ID, "account_id": 999999}, ACCOUNT_ID, RANGE_ID, report
-    )
+    check_tenant_scope({"range_id": RANGE_ID, "account_id": 999999}, ACCOUNT_ID, RANGE_ID, report)
     assert not report.passed
     assert "999999" in report.failures[0]
 
@@ -189,9 +188,7 @@ def test_claiming_an_action_was_taken_is_rejected():
 
 def test_unknown_policy_option_is_rejected():
     report = ValidationReport(passed=True)
-    check_allowed_actions(
-        {"options": [{"policy_key": "null_route_the_prefix"}]}, report
-    )
+    check_allowed_actions({"options": [{"policy_key": "null_route_the_prefix"}]}, report)
     assert not report.passed
     assert "null_route_the_prefix" in report.failures[0]
 

@@ -7,18 +7,17 @@ the warning, and so the head start.
 
 from __future__ import annotations
 
-import importlib
 import json
 
 import numpy as np
 import pytest
+from conftest import EPOCH, RANGE_ID, make_services
+from test_alerting import ScriptedForecaster, make_replay
 
-from conftest import EPOCH, RANGE_ID
 from dfsi.api import replay as replay_engine
 from dfsi.config import PATHS, STATE_ABOUT_TO_START
 from dfsi.forecaster.range_thresholds import load_range_thresholds
 from dfsi.forecaster.serve import ForecasterService
-from test_alerting import ScriptedForecaster, make_replay
 
 SCORES = [0.1, 0.6, 0.6, 0.6, 0.6, 0.6]  # above 0.5, below 0.7
 
@@ -123,8 +122,11 @@ def test_the_counterfactual_is_offered_against_the_range_threshold(tmp_path, mon
     service._features = ["growth_pps_60s"]
     seen: list[float] = []
     monkeypatch.setattr(
-        service, "_counterfactual",
-        lambda row, score, evidence, threshold=None: seen.append(threshold) or {"threshold": threshold},
+        service,
+        "_counterfactual",
+        lambda row, score, evidence, threshold=None: (
+            seen.append(threshold) or {"threshold": threshold}
+        ),
     )
     monkeypatch.setattr(service, "build_evidence", lambda row, score: [])
 
@@ -167,17 +169,14 @@ def test_no_range_threshold_uses_the_model():
 # ------------------------------------------------------------------- the API
 
 
-@pytest.fixture
-def api():
-    return importlib.import_module("dfsi.api.app")
-
-
-def test_the_default_decision_epoch_follows_the_range_threshold(api, monkeypatch):
+def test_the_default_decision_epoch_follows_the_range_threshold(tmp_path):
     replay = make_replay(len(SCORES))
-    monkeypatch.setattr(api, "_forecaster", ScriptedForecaster(SCORES, threshold=0.5))
-    monkeypatch.setattr(api.replay_engine, "load_replay", lambda replay_id: replay)
-
-    monkeypatch.setattr(api, "_range_thresholds", {})
-    assert api._replay_and_decision_epoch("scripted", None)[1] == EPOCH + 20
-    monkeypatch.setattr(api, "_range_thresholds", {RANGE_ID: 0.7})
-    assert api._replay_and_decision_epoch("scripted", None)[1] == EPOCH + 50  # never warns
+    api = make_services(
+        tmp_path,
+        forecaster=ScriptedForecaster(SCORES, threshold=0.5),
+        load_stored_replay=lambda replay_id: replay,
+        range_thresholds={},
+    )
+    assert api.resolve_decision_epoch("scripted", None)[1] == EPOCH + 20
+    api.range_thresholds = {RANGE_ID: 0.7}
+    assert api.resolve_decision_epoch("scripted", None)[1] == EPOCH + 50  # never warns

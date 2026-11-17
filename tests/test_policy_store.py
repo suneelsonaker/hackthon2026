@@ -8,13 +8,19 @@ the store's bookkeeping (versions, history, reset).
 
 from __future__ import annotations
 
-import importlib
 import json
 
 import pytest
+from conftest import (
+    POLICY_PPS,
+    RANGE_ID,
+    attack_windows,
+    make_client,
+    requires_memory,
+    requires_model,
+)
 
-from conftest import POLICY_PPS, RANGE_ID, attack_windows, requires_memory, requires_model
-from dfsi.config import PATHS, STAGE_THRESHOLDS, Paths
+from dfsi.config import PATHS, STAGE_THRESHOLDS
 from dfsi.rehearsal.policy_store import PolicyStore, apply_policy
 
 
@@ -124,7 +130,9 @@ def test_a_tighter_line_drops_more_and_rings_the_bell_no_later():
     store.apply_change(RANGE_ID, {"udp": 20_000.0})
     after = apply_policy(rows, store.range_policy(RANGE_ID), STAGE_THRESHOLDS)
 
-    blocked = lambda rs: sum(r["blocked_pps"] for r in rs if r["traffic_type"] == "udp")
+    def blocked(rs):
+        return sum(r["blocked_pps"] for r in rs if r["traffic_type"] == "udp")
+
     assert blocked(after) > blocked(before)
     assert _first_declared(after) is not None
     assert _first_declared(before) is None or _first_declared(after) <= _first_declared(before)
@@ -151,36 +159,46 @@ def test_rederiving_under_the_recorded_policy_reproduces_the_pipeline():
     """The replay-side rules must be the feature pipeline's rules, exactly."""
     store = PolicyStore.from_file(PATHS.policy_db)
     fields = (
-        "blocked_pps", "blocked_share", "blocked_share_delta_10s", "blocked_share_delta_60s",
-        "policy_utilisation", "range_over_threshold", "declared", "is_onset", "label_onset_120s",
+        "blocked_pps",
+        "blocked_share",
+        "blocked_share_delta_10s",
+        "blocked_share_delta_60s",
+        "policy_utilisation",
+        "range_over_threshold",
+        "declared",
+        "is_onset",
+        "label_onset_120s",
     )
     for entry in json.loads((PATHS.replay / "catalogue.json").read_text()):
         replay = json.loads((PATHS.replay / f"{entry['replay_id']}.json").read_text())
-        derived = apply_policy(replay["windows"], store.range_policy(replay["range_id"]), force=True)
+        derived = apply_policy(
+            replay["windows"], store.range_policy(replay["range_id"]), force=True
+        )
         for original, row in zip(replay["windows"], derived):
             for field in fields:
-                assert row[field] == pytest.approx(original[field], abs=1e-9), (entry["replay_id"], field)
+                assert row[field] == pytest.approx(original[field], abs=1e-9), (
+                    entry["replay_id"],
+                    field,
+                )
 
 
 # ------------------------------------------------- approve, then replay again
 
 
 @pytest.fixture
-def api_client(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-
-    api = importlib.import_module("dfsi.api.app")
-    monkeypatch.setattr(api, "PATHS", Paths(home=tmp_path))  # the real audit log stays clean
-    monkeypatch.setattr(api, "_policy_store", PolicyStore.from_file(PATHS.policy_db))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    return TestClient(api.app)
+def api_client(tmp_path):
+    # A private audit log and a fresh copy of the seed store, so an approved
+    # change cannot leak into other tests or the real data/decisions/.
+    return make_client(tmp_path)
 
 
 def _run(client, replay_id: str) -> dict:
     with client.stream(
         "POST", "/api/replay/stream", json={"replay_id": replay_id, "speed_seconds": 0}
     ) as response:
-        events = [json.loads(line[5:]) for line in response.iter_lines() if line.startswith("data:")]
+        events = [
+            json.loads(line[5:]) for line in response.iter_lines() if line.startswith("data:")
+        ]
     assert events[-1]["type"] == "summary"
     return events[-1]
 
@@ -208,7 +226,9 @@ def tightenable(api_client) -> str:
     for entry in api_client.get("/api/replays").json()["replays"]:
         if not entry["has_onset"]:
             continue
-        plan = api_client.post("/api/drill", json={"replay_id": entry["replay_id"]}).json()["policy_plan"]
+        plan = api_client.post("/api/drill", json={"replay_id": entry["replay_id"]}).json()[
+            "policy_plan"
+        ]
         if plan["change"] != "no change":
             return entry["replay_id"]
     pytest.skip("no replay in the catalogue has a tightening to approve")
@@ -225,7 +245,10 @@ def test_an_approved_change_is_in_force_on_the_next_run(api_client, tightenable)
     after = _run(api_client, tightenable)
     assert after["policy_version"] == record["policy_version_after"]
     new_line = record["policy_change"]["per_type"][0]
-    assert after["policy"][new_line["traffic_type"]]["max_threshold_pps"] == new_line["suggested_policy_pps"]
+    assert (
+        after["policy"][new_line["traffic_type"]]["max_threshold_pps"]
+        == new_line["suggested_policy_pps"]
+    )
     assert after["blocked_share_total"] > before["blocked_share_total"]
     assert after["peak_passed_pps"] < before["peak_passed_pps"]
     assert after["bell_after_seconds"] <= before["bell_after_seconds"]
@@ -252,3 +275,21 @@ def test_reset_puts_the_seed_back_in_force(api_client, tightenable):
     after = _run(api_client, tightenable)
     assert after["blocked_share_total"] == pytest.approx(before["blocked_share_total"])
     assert after["policy"] == before["policy"]
+
+
+def test_a_change_to_the_current_line_is_not_a_change():
+    store = PolicyStore.from_file(PATHS.policy_db)
+    current = store.range_policy(RANGE_ID)["udp"].pps
+    before = store.version
+    assert store.apply_change(RANGE_ID, {"udp": current}) == before
+    assert store.version == before
+    assert store.snapshot()["history"] == []
+
+
+def test_a_rejected_change_leaves_every_line_untouched():
+    store = PolicyStore.from_file(PATHS.policy_db)
+    before = {t: p.pps for t, p in store.range_policy(RANGE_ID).items()}
+    with pytest.raises(KeyError):
+        store.apply_change(RANGE_ID, {"udp": 1_234.0, "gre": 5.0})  # second type is unknown
+    assert {t: p.pps for t, p in store.range_policy(RANGE_ID).items()} == before
+    assert store.snapshot()["history"] == []

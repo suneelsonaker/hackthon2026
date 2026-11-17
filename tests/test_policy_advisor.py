@@ -11,7 +11,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
 from conftest import (
     EPOCH,
     POLICY_PPS,
@@ -22,6 +21,7 @@ from conftest import (
     requires_memory,
     requires_model,
 )
+
 from dfsi.agents.orchestrator import ExplainerOrchestrator
 from dfsi.agents.tools import EvidenceBundle
 from dfsi.rehearsal.policy_advisor import (
@@ -263,27 +263,21 @@ def test_every_demo_replay_has_a_week_of_history():
 
 @requires_memory
 @requires_model
-def test_an_approved_threshold_change_is_recorded_with_its_numbers(tmp_path, monkeypatch):
+def test_an_approved_threshold_change_is_recorded_with_its_numbers(tmp_path):
     """The audit record states the exact thresholds a human signed off on."""
-    import importlib
     import json
 
-    from fastapi.testclient import TestClient
+    from conftest import make_client
 
-    from dfsi.config import PATHS, Paths
-    from dfsi.rehearsal.policy_store import PolicyStore
+    from dfsi.config import PATHS
 
-    api = importlib.import_module("dfsi.api.app")  # the module, not the FastAPI object
-
-    monkeypatch.setattr(api, "PATHS", Paths(home=tmp_path))  # keep the real audit log clean
-    # A private store, so an approved change cannot leak into other tests.
-    monkeypatch.setattr(api, "_policy_store", PolicyStore.from_file(PATHS.policy_db))
+    # A private audit log and store, so an approved change cannot leak elsewhere.
+    client = make_client(tmp_path)
     replay_id = next(
         e["replay_id"]
         for e in json.loads((PATHS.replay / "catalogue.json").read_text())
         if e["scenario_type"] == "sustained_attack"
     )
-    client = TestClient(api.app)
     drill = client.post("/api/drill", json={"replay_id": replay_id}).json()
     assert drill["policy_plan"]["available"]
 
@@ -300,5 +294,5 @@ def test_an_approved_threshold_change_is_recorded_with_its_numbers(tmp_path, mon
     assert record["applied"] is bool(record["policy_change"]["per_type"])
     assert record["policy_change"]["basis"] == "past-week thresholds"
     assert record["policy_change"]["change"] == drill["policy_plan"]["change"]
-    logged = (tmp_path / "data" / "decisions" / "decisions.jsonl").read_text().splitlines()
+    logged = (tmp_path / "decisions.jsonl").read_text().splitlines()
     assert json.loads(logged[-1])["policy_change"] == record["policy_change"]

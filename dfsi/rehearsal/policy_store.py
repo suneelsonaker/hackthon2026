@@ -28,9 +28,9 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from ..config import HORIZON_WINDOWS, SharedStateThresholds, thresholds_for
 
@@ -61,7 +61,7 @@ class PolicyStore:
 
     # ------------------------------------------------------------ loading
     @classmethod
-    def from_file(cls, path: Path) -> "PolicyStore":
+    def from_file(cls, path: Path) -> PolicyStore:
         if not path.exists():
             log.warning("no policy db at %s; replays keep their recorded policy", path)
             return cls(None, source=None)
@@ -81,7 +81,9 @@ class PolicyStore:
                         pps=float(spec["max_threshold_pps"]),
                         mbps=float(spec["max_threshold_mbps"]),
                         mean_packet_bytes=int(
-                            spec.get("mean_packet_bytes", _DEFAULT_PACKET_BYTES.get(traffic_type, 1000))
+                            spec.get(
+                                "mean_packet_bytes", _DEFAULT_PACKET_BYTES.get(traffic_type, 1000)
+                            )
                         ),
                     )
                     for traffic_type, spec in rng.get("traffic_types", {}).items()
@@ -149,13 +151,18 @@ class PolicyStore:
             policy = self._policies.get(range_id)
             if policy is None:
                 raise KeyError(f"range {range_id} is not in the policy store")
-            changes = []
+            # Validate everything first: a bad line must not leave the earlier
+            # ones applied with no version bump and no history entry.
             for traffic_type, pps in new_pps.items():
                 if traffic_type not in policy:
                     raise KeyError(f"range {range_id} has no {traffic_type} policy")
                 if not pps > 0:
                     raise ValueError(f"policy line must be positive, got {pps}")
+            changes = []
+            for traffic_type, pps in new_pps.items():
                 old = policy[traffic_type]
+                if float(pps) == old.pps:
+                    continue  # not a change: no new version, no history entry
                 mbps = pps * old.mean_packet_bytes * 8 / 1_000_000
                 policy[traffic_type] = TypePolicy(float(pps), float(mbps), old.mean_packet_bytes)
                 changes.append(
@@ -274,7 +281,9 @@ def apply_policy(
     # Per-type label: an onset this type carries within the horizon.
     index = {e: i for i, e in enumerate(epochs)}
     for series in by_type.values():
-        carries = [onset[index[int(r["window_start_epoch"])]] * int(r["over_threshold"]) for r in series]
+        carries = [
+            onset[index[int(r["window_start_epoch"])]] * int(r["over_threshold"]) for r in series
+        ]
         for i, row in enumerate(series):
             row["label_onset_120s"] = int(any(carries[i + 1 : i + 1 + HORIZON_WINDOWS]))
     return rows

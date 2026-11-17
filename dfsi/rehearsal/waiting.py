@@ -36,8 +36,8 @@ same recorded traffic and the same stated assumptions as the rest of the drill.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Sequence
 
 from ..config import WINDOW_SECONDS
 from .options import simulate_option
@@ -59,9 +59,7 @@ def validate_waits(waits: Sequence[int]) -> tuple[int, ...]:
         if wait <= 0 or wait > MAX_WAIT_SECONDS:
             raise ValueError(f"wait must be between 1 and {MAX_WAIT_SECONDS} seconds, got {wait}")
         if wait % WINDOW_SECONDS:
-            raise ValueError(
-                f"wait must be a multiple of the {WINDOW_SECONDS}s window, got {wait}"
-            )
+            raise ValueError(f"wait must be a multiple of the {WINDOW_SECONDS}s window, got {wait}")
         cleaned.add(wait)
     if not cleaned:
         raise ValueError("at least one wait is required")

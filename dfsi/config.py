@@ -97,11 +97,10 @@ def thresholds_for(environment: str | None = None) -> SharedStateThresholds:
     Stage is the default because the hackathon demo replays minutes, not hours,
     and the 300s prod start duration would not fit inside a demo window.
     """
-    env = (environment or os.getenv("DFSI_ENV", "stage")).lower()
+    env = (environment or os.getenv("DFSI_ENV") or "stage").lower()
     if env not in THRESHOLDS_BY_ENV:
         raise ValueError(
-            f"unknown DFSI environment {env!r}; expected one of "
-            f"{sorted(THRESHOLDS_BY_ENV)}"
+            f"unknown DFSI environment {env!r}; expected one of {sorted(THRESHOLDS_BY_ENV)}"
         )
     return THRESHOLDS_BY_ENV[env]
 

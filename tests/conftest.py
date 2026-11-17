@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dfsi.config import PATHS, STAGE_THRESHOLDS  # noqa: E402
+from dfsi.config import PATHS, STAGE_THRESHOLDS
 
 EPOCH = 1_767_225_600
 RANGE_ID = 90110001
@@ -153,3 +153,28 @@ requires_model = pytest.mark.skipif(
     not (PATHS.models / "forecaster.pkl").exists(),
     reason="no trained model; run `python -m dfsi.forecaster.train`",
 )
+
+
+def make_services(tmp_path: Path, **overrides):
+    """Production wiring with test-safe defaults, any collaborator overridable.
+
+    The audit log goes to `tmp_path`, the explainers run offline, and the
+    policy store is a fresh copy of the raw.json seed, so nothing one test
+    approves can leak into another or into the real `data/decisions/`.
+    """
+    from dfsi.agents.orchestrator import ExplainerOrchestrator
+    from dfsi.api.audit import AuditLog
+    from dfsi.api.services import build_services
+
+    overrides.setdefault("audit_log", AuditLog(tmp_path / "decisions.jsonl"))
+    overrides.setdefault("orchestrator", ExplainerOrchestrator(api_key=None))
+    return build_services(**overrides)
+
+
+def make_client(tmp_path: Path, **overrides):
+    """A `TestClient` on an app built from `make_services(tmp_path, **overrides)`."""
+    from fastapi.testclient import TestClient
+
+    from dfsi.api.app import create_app
+
+    return TestClient(create_app(make_services(tmp_path, **overrides)))

@@ -14,10 +14,11 @@ seconds DFSI buys them.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Sequence
 
 from ..config import WINDOW_SECONDS, thresholds_for
+
 
 #: Effectiveness of each candidate against attack traffic, and its cost to
 #: legitimate traffic. These are stated assumptions of the simulation, not
@@ -249,7 +250,7 @@ def _time_to_contain(
     clear_run = 0
     crossed = False
     required = 3  # 30 seconds under threshold counts as held
-    for epoch, is_over in zip(candidate.epochs, candidate.over):
+    for epoch, is_over in zip(candidate.epochs, candidate.over, strict=True):
         if is_over:
             crossed = True
             clear_run = 0
@@ -323,9 +324,7 @@ def simulate(
     if candidate.key == "hold":
         notes.append("Baseline: this is what happens if the operator does nothing.")
     if candidate.legitimate_collateral >= 0.1:
-        notes.append(
-            "High collateral: legitimate services on this range would notice."
-        )
+        notes.append("High collateral: legitimate services on this range would notice.")
     if candidate.key == "full_scrub":
         notes.append("See PPNG-6760 — a /24 diversion can also catch Teams/Zoom traffic.")
     if attack_total <= 0.0:

@@ -1,0 +1,73 @@
+[project]
+name = "dfsi"
+version = "0.1.0"
+description = "DDoS Future-State Intelligence — a read-only, simulation-only predictive lookout beside Shared State"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# Runtime pins live in requirements.txt (what the results were measured on);
+# requirements-dev.txt adds the lint, type and coverage tooling CI runs.
+
+[tool.setuptools.packages.find]
+include = ["dfsi*"]
+
+# --------------------------------------------------------------------------- #
+# Lint + format
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["ui", "data", "models", "mlruns", "logs"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "SIM",      # simplify
+    "BLE",      # blind except: every broad catch must say why
+    "RUF",
+]
+ignore = [
+    "E501",     # line length is the formatter's job
+    "RUF001",   # the prose deliberately uses typographic dashes and quotes
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["BLE001", "B011", "B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dfsi"]
+
+# --------------------------------------------------------------------------- #
+# Types
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+packages = ["dfsi"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true   # pyspark, mlflow and sklearn ship partial stubs
+
+# --------------------------------------------------------------------------- #
+# Coverage
+# --------------------------------------------------------------------------- #
+[tool.coverage.run]
+source = ["dfsi"]
+branch = true
+# The integration test runs the real Memory and training CLIs as subprocesses;
+# measure those too, so PySpark and training code count towards coverage.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

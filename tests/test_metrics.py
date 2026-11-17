@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-
 from conftest import EPOCH
+
 from dfsi.forecaster.metrics import (
     ScenarioOutcome,
     evaluate,
@@ -46,11 +46,7 @@ def scenario(
     and only then does the bell ring. `in_progress` opens the episode already
     over threshold, which is the left-censored case.
     """
-    crossing = (
-        0
-        if in_progress
-        else max(1, (onset_index or 0) - debounce_windows + 1)
-    )
+    crossing = 0 if in_progress else max(1, (onset_index or 0) - debounce_windows + 1)
     return [
         {
             "scenario_id": scenario_id,
@@ -70,8 +66,11 @@ def scenario(
 
 def test_lead_is_onset_minus_first_warning():
     outcome = ScenarioOutcome(
-        scenario_id="s", scenario_type="gradual_buildup", has_onset=True,
-        onset_epoch=EPOCH + 200, first_warning_epoch=EPOCH + 80,
+        scenario_id="s",
+        scenario_type="gradual_buildup",
+        has_onset=True,
+        onset_epoch=EPOCH + 200,
+        first_warning_epoch=EPOCH + 80,
     )
     assert outcome.lead_seconds == 120.0
     assert outcome.warned is True
@@ -79,8 +78,11 @@ def test_lead_is_onset_minus_first_warning():
 
 def test_no_warning_means_no_lead():
     outcome = ScenarioOutcome(
-        scenario_id="s", scenario_type="sustained_attack", has_onset=True,
-        onset_epoch=EPOCH + 100, first_warning_epoch=None,
+        scenario_id="s",
+        scenario_type="sustained_attack",
+        has_onset=True,
+        onset_epoch=EPOCH + 100,
+        first_warning_epoch=None,
     )
     assert outcome.lead_seconds is None
     assert outcome.warned is False
@@ -89,17 +91,18 @@ def test_no_warning_means_no_lead():
 def test_no_onset_means_no_lead():
     """A warning on a quiet scenario is a false alarm, not a lead time."""
     outcome = ScenarioOutcome(
-        scenario_id="s", scenario_type="normal", has_onset=False,
-        onset_epoch=None, first_warning_epoch=EPOCH + 50,
+        scenario_id="s",
+        scenario_type="normal",
+        has_onset=False,
+        onset_epoch=None,
+        first_warning_epoch=EPOCH + 50,
     )
     assert outcome.lead_seconds is None
     assert outcome.warned is True
 
 
 def test_warning_after_the_onset_is_negative_and_counted_as_a_miss():
-    frame = scored_frame(
-        scenario("late", "sustained_attack", [0.0] * 6 + [0.9] * 6, onset_index=3)
-    )
+    frame = scored_frame(scenario("late", "sustained_attack", [0.0] * 6 + [0.9] * 6, onset_index=3))
     result = evaluate(frame, "risk_score", 0.5)
     assert result.attacks_caught == 0.0, "a late warning must not count as caught"
     assert result.late_warning_count == 1
@@ -184,9 +187,7 @@ def test_fixed_threshold_baseline_cannot_warn_early():
     This is the comparison the whole project rests on, so it is asserted
     rather than assumed.
     """
-    frame = scored_frame(
-        scenario("attack", "gradual_buildup", [0.0] * 12, onset_index=6)
-    )
+    frame = scored_frame(scenario("attack", "gradual_buildup", [0.0] * 12, onset_index=6))
     frame["baseline"] = fixed_threshold_baseline(frame)
     result = evaluate(frame, "baseline", 0.5, min_consecutive=1)
     assert result.attacks_caught == 0.0

@@ -69,6 +69,8 @@ export const api = {
     verdict: 'approved' | 'rejected' | 'changed'
     note?: string
     modelVersion: string
+    /** The Advisor's pick, approved or overridden. */
+    recommendedPolicyKey?: PolicyKey | null
   }) =>
     postJson<DecisionRecord>('/api/decision', {
       replay_id: input.replayId,
@@ -77,6 +79,7 @@ export const api = {
       verdict: input.verdict,
       note: input.note ?? '',
       model_version: input.modelVersion,
+      recommended_policy_key: input.recommendedPolicyKey ?? null,
     }),
   decisions: () => getJson<{ decisions: DecisionRecord[] }>('/api/decisions'),
   policies: () => getJson<PolicySnapshot>('/api/policies'),
@@ -119,6 +122,20 @@ export function streamReplay(
       const decoder = new TextDecoder()
       let buffer = ''
 
+      const emit = (frame: string) => {
+        const payload = frame
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+          .join('')
+        if (!payload) return
+        try {
+          onEvent(JSON.parse(payload) as ReplayEvent)
+        } catch {
+          // A malformed frame should not kill the stream.
+        }
+      }
+
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
@@ -127,23 +144,14 @@ export function streamReplay(
         // SSE frames are separated by a blank line. Keep any partial frame.
         let boundary = buffer.indexOf('\n\n')
         while (boundary !== -1) {
-          const frame = buffer.slice(0, boundary)
+          emit(buffer.slice(0, boundary))
           buffer = buffer.slice(boundary + 2)
-          const payload = frame
-            .split('\n')
-            .filter((line) => line.startsWith('data:'))
-            .map((line) => line.slice(5).trim())
-            .join('')
-          if (payload) {
-            try {
-              onEvent(JSON.parse(payload) as ReplayEvent)
-            } catch {
-              // A malformed frame should not kill the stream.
-            }
-          }
           boundary = buffer.indexOf('\n\n')
         }
       }
+      // A stream may end without the blank line after its last frame.
+      buffer += decoder.decode()
+      if (buffer.trim()) emit(buffer)
       onDone()
     } catch (error) {
       if (controller.signal.aborted) {

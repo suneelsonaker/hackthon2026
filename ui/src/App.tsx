@@ -5,24 +5,18 @@
  * risk score climb before the threshold alarm → ask the agents whether it is
  * an attack or a flash crowd → compare the four responses → record a human
  * decision.
+ *
+ * State lives in hooks (`src/hooks/`); this component only wires the steps
+ * together and lays the panels out.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, streamReplay } from './lib/api'
-import type {
-  Briefing,
-  CatalogueEntry,
-  DecisionRecord,
-  DrillResult,
-  Health,
-  ModelCard,
-  PolicyKey,
-  PolicySnapshot,
-  ReplayEvent,
-  RiskThresholds,
-  SummaryEvent,
-  WindowEvent,
-} from './lib/types'
+import type { PolicyKey } from './lib/types'
+import { focusedWindow, latestWindow } from './hooks/replayReducer'
+import { thresholdFor, useDashboardData } from './hooks/useDashboardData'
+import { usePolicies } from './hooks/usePolicies'
+import { useBriefing, useDecision, useDrill } from './hooks/useRehearsal'
+import { useReplayStream } from './hooks/useReplayStream'
 import { DecisionBar } from './components/DecisionBar'
 import { EvidencePanel } from './components/EvidencePanel'
 import { PolicyPanel } from './components/PolicyPanel'
@@ -33,256 +27,108 @@ import { TradeOffTable } from './components/TradeOffTable'
 import { TriggerPanel } from './components/TriggerPanel'
 
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null)
-  const [modelCard, setModelCard] = useState<ModelCard | null>(null)
-  const [catalogue, setCatalogue] = useState<CatalogueEntry[]>([])
-  const [bootError, setBootError] = useState<string | null>(null)
+  const { health, modelCard, catalogue, bootError, riskThresholds, initialReplayId } =
+    useDashboardData()
+  const stream = useReplayStream()
+  const policyStore = usePolicies()
+  const briefing = useBriefing()
+  const drill = useDrill()
+  const decision = useDecision()
 
-  const [selectedReplay, setSelectedReplay] = useState<string | null>(null)
+  // `undefined` until the operator (or the trigger panel) picks: the default
+  // replay applies from the first render with data, with no effect in between
+  // for a child to overwrite it.
+  const [chosenReplay, setSelectedReplay] = useState<string | null | undefined>(undefined)
+  const selectedReplay = chosenReplay === undefined ? initialReplayId : chosenReplay
   const [speed, setSpeed] = useState(0.25)
-  const [running, setRunning] = useState(false)
-  const [windows, setWindows] = useState<WindowEvent[]>([])
-  const [streamError, setStreamError] = useState<string | null>(null)
-  const abortRef = useRef<(() => void) | null>(null)
-
-  // The window the operator is reasoning about. Follows the stream while it
-  // runs, then stays put so the drill and the briefing agree on one instant.
-  const [focusEpoch, setFocusEpoch] = useState<number | null>(null)
-
-  const [briefing, setBriefing] = useState<Briefing | null>(null)
-  const [briefingLoading, setBriefingLoading] = useState(false)
-  const [briefingError, setBriefingError] = useState<string | null>(null)
-
-  const [drill, setDrill] = useState<DrillResult | null>(null)
-  const [drillLoading, setDrillLoading] = useState(false)
-  const [drillError, setDrillError] = useState<string | null>(null)
-
   const [selectedPolicy, setSelectedPolicy] = useState<PolicyKey | null>(null)
-  const [lastDecision, setLastDecision] = useState<DecisionRecord | null>(null)
-  const [decisionBusy, setDecisionBusy] = useState(false)
-  const [decisionError, setDecisionError] = useState<string | null>(null)
-
-  // The simulated policy store, and each replay's finished runs (so a run
-  // after an approval can be compared with the run before it).
-  const [policies, setPolicies] = useState<PolicySnapshot | null>(null)
-  const [policyBusy, setPolicyBusy] = useState(false)
   const [policyCollapsed, setPolicyCollapsed] = useState(false)
   const bellHandledRef = useRef<string | null>(null)
-  const [runs, setRuns] = useState<Record<string, SummaryEvent[]>>({})
 
-  const refreshPolicies = useCallback(async () => {
-    try {
-      setPolicies(await api.policies())
-    } catch {
-      // Informational: the replay still runs under whatever the API holds.
-    }
-  }, [])
-
-  useEffect(() => {
-    void refreshPolicies()
-  }, [refreshPolicies])
-
-  // Per-range decision thresholds, as configured in raw.json.
-  const [riskThresholds, setRiskThresholds] = useState<RiskThresholds | null>(null)
-  useEffect(() => {
-    api.riskThresholds().then(setRiskThresholds, () => {
-      // Informational: without it the timeline uses the model card's threshold.
-    })
-  }, [])
-
-  // ---------------------------------------------------------------- boot
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const [healthResult, replayResult] = await Promise.all([
-          api.health(),
-          api.replays(),
-        ])
-        if (cancelled) return
-        setHealth(healthResult)
-        setCatalogue(replayResult.replays)
-        setSelectedReplay(
-          replayResult.replays.find((entry) => entry.scenario_type === 'gradual_buildup')
-            ?.replay_id ?? replayResult.replays[0]?.replay_id ?? null,
-        )
-      } catch (error) {
-        if (!cancelled) {
-          setBootError(error instanceof Error ? error.message : String(error))
-        }
-      }
-      try {
-        const card = await api.modelCard()
-        if (!cancelled) setModelCard(card)
-      } catch {
-        // The model card is informational; the dashboard works without it.
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // Abort any live stream when the component goes away.
-  useEffect(() => () => abortRef.current?.(), [])
+  const { running, windows, focusEpoch, runs, streamError } = stream.state
+  const latest = latestWindow(stream.state)
+  const focused = focusedWindow(stream.state)
+  const modelVersion = health?.model_version ?? 'unknown'
 
   // ---------------------------------------------------------------- replay
-  const handleEvent = useCallback((event: ReplayEvent) => {
-    switch (event.type) {
-      case 'start':
-        setWindows([])
-        setStreamError(null)
-        break
-      case 'window':
-        setWindows((previous) => [...previous, event])
-        setFocusEpoch(event.window_start_epoch)
-        break
-      case 'summary':
-        // The stream ends a few windows after the bell, which can be a lull
-        // (between pulses, say). The moment an operator decides at is DFSI's
-        // warning, which is also the API's default, so settle the focus there.
-        if (event.first_warning_epoch !== null) setFocusEpoch(event.first_warning_epoch)
-        setRuns((previous) => ({
-          ...previous,
-          [event.replay_id]: [...(previous[event.replay_id] ?? []), event].slice(-5),
-        }))
-        break
-      case 'error':
-        setStreamError(event.message)
-        break
-    }
-  }, [])
+  const { clear: clearBriefing } = briefing
+  const { clear: clearDrill, run: runDrillRequest } = drill
+  const { clear: clearDecision } = decision
 
   const start = useCallback(() => {
     if (!selectedReplay) return
-    abortRef.current?.()
-    setWindows([])
-    setBriefing(null)
-    setDrill(null)
+    clearBriefing()
+    clearDrill()
+    clearDecision()
     setSelectedPolicy(null)
-    setLastDecision(null)
-    setStreamError(null)
     setPolicyCollapsed(false)
     bellHandledRef.current = null
-    setRunning(true)
-
-    abortRef.current = streamReplay(
-      { replayId: selectedReplay, speedSeconds: speed },
-      handleEvent,
-      (error) => {
-        setRunning(false)
-        abortRef.current = null
-        if (error) setStreamError(error.message)
-      },
-    )
-  }, [handleEvent, selectedReplay, speed])
-
-  const stop = useCallback(() => {
-    abortRef.current?.()
-    abortRef.current = null
-    setRunning(false)
-  }, [])
+    stream.start(selectedReplay, speed)
+  }, [clearBriefing, clearDecision, clearDrill, selectedReplay, speed, stream.start])
 
   // ------------------------------------------------------- agents & drill
   const requestBriefing = useCallback(async () => {
     if (!selectedReplay) return
-    setBriefingLoading(true)
-    setBriefingError(null)
-    try {
-      const result = await api.explain(selectedReplay, focusEpoch ?? undefined)
-      setBriefing(result)
-      const pick = result.advisor.output.recommended_policy_key
-      if (pick) setSelectedPolicy(pick)
-    } catch (error) {
-      setBriefingError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBriefingLoading(false)
-    }
-  }, [focusEpoch, selectedReplay])
+    const result = await briefing.run(selectedReplay, focusEpoch)
+    const pick = result?.advisor.output.recommended_policy_key
+    if (pick) setSelectedPolicy(pick)
+  }, [briefing.run, focusEpoch, selectedReplay])
 
   const runDrillAt = useCallback(
     async (epoch: number | null) => {
-      if (!selectedReplay) return
-      setDrillLoading(true)
-      setDrillError(null)
-      try {
-        setDrill(await api.drill(selectedReplay, epoch ?? undefined))
-      } catch (error) {
-        setDrillError(error instanceof Error ? error.message : String(error))
-      } finally {
-        setDrillLoading(false)
-      }
+      if (selectedReplay) await runDrillRequest(selectedReplay, epoch)
     },
-    [selectedReplay],
+    [runDrillRequest, selectedReplay],
   )
-
-  const runDrill = useCallback(() => runDrillAt(focusEpoch), [focusEpoch, runDrillAt])
 
   // Move the decision to the window DFSI warned at and re-run the drill there,
   // for when the operator is looking at a moment with nothing to tighten.
   const decideAtWarning = useCallback(() => {
-    const warning = windows[windows.length - 1]?.first_warning_epoch ?? null
+    const warning = latest?.first_warning_epoch ?? null
     if (warning === null) return
-    setFocusEpoch(warning)
+    stream.setFocus(warning)
     void runDrillAt(warning)
-  }, [runDrillAt, windows])
+  }, [latest, runDrillAt, stream.setFocus])
+
+  const decisionEpoch = drill.result?.decision_epoch ?? focusEpoch
+
+  const recommended = briefing.result?.advisor.output.recommended_policy_key ?? null
 
   const decide = useCallback(
     async (verdict: 'approved' | 'rejected' | 'changed', note: string) => {
-      if (!selectedReplay || !selectedPolicy) return
-      const epoch = drill?.decision_epoch ?? focusEpoch
-      if (epoch === null || epoch === undefined) return
-      setDecisionBusy(true)
-      setDecisionError(null)
-      try {
-        const record = await api.decide({
-          replayId: selectedReplay,
-          decisionEpoch: epoch,
-          policyKey: selectedPolicy,
-          verdict,
-          note,
-          modelVersion: health?.model_version ?? 'unknown',
-        })
-        setLastDecision(record)
-        // An applied change makes the drill on screen stale: it was simulated
-        // under the old lines. Refresh the store so the panel shows the new ones.
-        if (record.applied) {
-          setDrill(null)
-          await refreshPolicies()
-        }
-      } catch (error) {
-        setDecisionError(error instanceof Error ? error.message : String(error))
-      } finally {
-        setDecisionBusy(false)
+      if (!selectedReplay || !selectedPolicy || decisionEpoch === null) return
+      const record = await decision.run({
+        replayId: selectedReplay,
+        decisionEpoch,
+        policyKey: selectedPolicy,
+        verdict,
+        note,
+        modelVersion,
+        recommendedPolicyKey: recommended,
+      })
+      // An applied change makes the drill on screen stale: it was simulated
+      // under the old lines. Refresh the store so the panel shows the new ones.
+      if (record?.applied) {
+        clearDrill()
+        await policyStore.refresh()
       }
     },
     [
-      drill?.decision_epoch,
-      focusEpoch,
-      health?.model_version,
-      refreshPolicies,
+      clearDrill,
+      decision.run,
+      decisionEpoch,
+      modelVersion,
+      policyStore.refresh,
+      recommended,
       selectedPolicy,
       selectedReplay,
     ],
   )
 
-  const selectedRangeId =
-    catalogue.find((entry) => entry.replay_id === selectedReplay)?.range_id ?? null
-
   const resetPolicies = useCallback(async () => {
-    setPolicyBusy(true)
-    try {
-      setPolicies(await api.resetPolicies())
-      setDrill(null)
-    } finally {
-      setPolicyBusy(false)
-    }
-  }, [])
-
-  // ---------------------------------------------------------------- render
-  const latest = windows.length > 0 ? windows[windows.length - 1] : null
-  const focused =
-    windows.find((window) => window.window_start_epoch === focusEpoch) ?? latest
+    await policyStore.reset()
+    clearDrill()
+  }, [clearDrill, policyStore.reset])
 
   // The bell rings: get the policy table out of the way and rehearse a
   // mitigation straight away, once per run.
@@ -296,12 +142,10 @@ export default function App() {
     void runDrillAt(bellEpoch)
   }, [bellEpoch, runDrillAt, selectedReplay])
 
-  const recommended = briefing?.advisor.output.recommended_policy_key ?? null
-  const rangeThreshold =
-    (selectedRangeId !== null ? riskThresholds?.ranges[String(selectedRangeId)] : undefined) ??
-    riskThresholds?.model_default ??
-    modelCard?.decision_threshold ??
-    0.25
+  // ---------------------------------------------------------------- render
+  const selectedRangeId =
+    catalogue.find((entry) => entry.replay_id === selectedReplay)?.range_id ?? null
+  const rangeThreshold = thresholdFor(selectedRangeId, riskThresholds, modelCard)
 
   if (bootError) {
     return (
@@ -310,9 +154,7 @@ export default function App() {
         <section className="panel">
           <h2>DFSI is not ready</h2>
           <p className="error">{bootError}</p>
-          <p>
-            Build the Memory layer and train the forecaster, then restart the API:
-          </p>
+          <p>Build the Memory layer and train the forecaster, then restart the API:</p>
           <pre>
             {`python -m dfsi.memory.pipeline --days 28
 python -m dfsi.forecaster.train
@@ -331,14 +173,14 @@ uvicorn dfsi.api.app:app --port 8000`}
         <div className="column-left">
           <TriggerPanel
             catalogue={catalogue}
-            policies={policies}
+            policies={policyStore.policies}
             selected={selectedReplay}
             onSelect={setSelectedReplay}
             speed={speed}
             onSpeedChange={setSpeed}
             running={running}
             onStart={start}
-            onStop={stop}
+            onStop={stream.stop}
             disabled={!health?.forecaster_ready}
           />
           <RiskGauge
@@ -350,12 +192,12 @@ uvicorn dfsi.api.app:app --port 8000`}
           />
           <PolicyPanel
             rangeId={selectedRangeId}
-            snapshot={policies}
+            snapshot={policyStore.policies}
             runs={selectedReplay ? (runs[selectedReplay] ?? []) : []}
             onReset={resetPolicies}
             onReplay={start}
             canReplay={Boolean(selectedReplay) && !running && Boolean(health?.forecaster_ready)}
-            busy={policyBusy || running}
+            busy={policyStore.busy || running}
             collapsed={policyCollapsed}
             onToggle={() => setPolicyCollapsed((c) => !c)}
           />
@@ -367,22 +209,22 @@ uvicorn dfsi.api.app:app --port 8000`}
             threshold={rangeThreshold}
             selectedEpoch={focusEpoch}
             onScrub={(epoch) => {
-              if (!running) setFocusEpoch(epoch)
+              if (!running) stream.setFocus(epoch)
             }}
           />
           <EvidencePanel
-            briefing={briefing}
-            loading={briefingLoading}
-            error={briefingError}
+            briefing={briefing.result}
+            loading={briefing.loading}
+            error={briefing.error}
             onRequest={requestBriefing}
-            canRequest={Boolean(selectedReplay) && !briefingLoading}
+            canRequest={Boolean(selectedReplay) && !briefing.loading}
           />
           <TradeOffTable
-            drill={drill}
-            loading={drillLoading}
-            error={drillError}
-            onRun={runDrill}
-            canRun={Boolean(selectedReplay) && !drillLoading}
+            drill={drill.result}
+            loading={drill.loading}
+            error={drill.error}
+            onRun={() => void runDrillAt(focusEpoch)}
+            canRun={Boolean(selectedReplay) && !drill.loading}
             recommended={recommended}
             selected={selectedPolicy}
             onSelect={setSelectedPolicy}
@@ -390,17 +232,17 @@ uvicorn dfsi.api.app:app --port 8000`}
           <DecisionBar
             selected={selectedPolicy}
             recommended={recommended}
-            policyPlan={drill?.policy_plan ?? null}
-            modelVersion={health?.model_version ?? 'unknown'}
-            decisionEpoch={drill?.decision_epoch ?? focusEpoch}
+            policyPlan={drill.result?.policy_plan ?? null}
+            modelVersion={modelVersion}
+            decisionEpoch={decisionEpoch}
             warningEpoch={latest?.first_warning_epoch ?? null}
             onDecideAtWarning={decideAtWarning}
             onDecide={decide}
             onReplay={start}
             canReplay={!running}
-            lastDecision={lastDecision}
-            busy={decisionBusy}
-            error={decisionError}
+            lastDecision={decision.result}
+            busy={decision.loading}
+            error={decision.error}
           />
         </div>
       </div>

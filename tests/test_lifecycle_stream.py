@@ -9,16 +9,14 @@ window the evaluation credits the head start to.
 
 from __future__ import annotations
 
-import importlib
 import json
 import random
 
-import pytest
-from fastapi.testclient import TestClient
+from conftest import make_client
+from test_alerting import EPOCH, ScriptedForecaster, make_replay
 
 from dfsi.api import replay as replay_engine
 from dfsi.config import STATE_ABOUT_TO_START
-from test_alerting import EPOCH, ScriptedForecaster, make_replay
 
 #: Against a 0.65 threshold: warn 0.65, critical 0.825, held down to 0.5525.
 THRESHOLD = 0.65
@@ -62,12 +60,14 @@ def test_the_first_alert_is_the_window_the_dashboard_credits_the_lead_to():
             for _ in range(rng.randint(5, 40))
         ]
         state, events = stream(scores, min_consecutive=needed)
-        first_alert = next((e["window_start_epoch"] for e in events if e["alert"]["event"] == "raised"), None)
+        first_alert = next(
+            (e["window_start_epoch"] for e in events if e["alert"]["event"] == "raised"), None
+        )
         assert first_alert == state.first_warning_epoch, (needed, scores)
 
 
 def test_a_window_the_forecaster_could_not_score_is_flagged_and_clears_nothing():
-    state, events = stream([WARN, WARN, None, None, None])
+    _state, events = stream([WARN, WARN, None, None, None])
     assert [e["alert"]["degraded"] for e in events] == [False, False, True, True, True]
     assert all(e["alert"]["state"] == "WARNING" for e in events[1:])
     assert events[-1]["dfsi_state"] == "MONITORING_ONLY"
@@ -105,16 +105,18 @@ class StreamForecaster(ScriptedForecaster):
     ready = True
 
 
-def test_the_sse_summary_event_carries_the_alerts(monkeypatch):
-    api = importlib.import_module("dfsi.api.app")
+def test_the_sse_summary_event_carries_the_alerts(tmp_path):
     scores = [LOW, WARN, WARN, WARN] + [LOW] * 8
-    monkeypatch.setattr(api, "_forecaster", StreamForecaster(scores, threshold=THRESHOLD))
-    monkeypatch.setattr(api.replay_engine, "load_replay", lambda replay_id: make_replay(len(scores)))
-
-    response = TestClient(api.app).post(
-        "/api/replay/stream", json={"replay_id": "scripted", "speed_seconds": 0}
+    client = make_client(
+        tmp_path,
+        forecaster=StreamForecaster(scores, threshold=THRESHOLD),
+        load_stored_replay=lambda replay_id: make_replay(len(scores)),
     )
-    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+
+    response = client.post("/api/replay/stream", json={"replay_id": "scripted", "speed_seconds": 0})
+    events = [
+        json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+    ]
 
     assert events[0]["type"] == "start" and events[-1]["type"] == "summary"
     windows = [e for e in events if e["type"] == "window"]

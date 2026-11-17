@@ -20,9 +20,9 @@ import pickle
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, make_row
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from conftest import ACCOUNT_ID, EPOCH, RANGE_ID, make_row
 from dfsi.agents.tools import EvidenceBundle
 from dfsi.config import FEATURE_VERSION
 from dfsi.forecaster.serve import EVIDENCE_LABELS, ForecasterService
@@ -154,7 +154,9 @@ def test_a_contribution_is_the_score_drop_when_the_feature_is_reset(trained, tmp
     row = row_for(growth_pps_60s=1.8, country_hhi=0.9)
 
     forecast = service.score_window([row])
-    reset = pd.DataFrame([{**{name: row[name] for name in FEATURES}, DRIVER_A: reference[DRIVER_A]}])
+    reset = pd.DataFrame(
+        [{**{name: row[name] for name in FEATURES}, DRIVER_A: reference[DRIVER_A]}]
+    )
     expected = forecast.risk_score - model.predict_proba(reset)[0, 1]
     reported = by_feature(forecast)[DRIVER_A]["contribution"]
 
@@ -175,7 +177,9 @@ def test_a_feature_holding_risk_down_has_a_negative_contribution(trained, tmp_pa
 
 def test_evidence_is_at_most_top_n_and_only_labelled_features(trained, tmp_path):
     model, frame, label, _ = trained
-    forecast = forecast_for(save(tmp_path, model, frame, label), growth_pps_60s=1.8, country_hhi=0.9)
+    forecast = forecast_for(
+        save(tmp_path, model, frame, label), growth_pps_60s=1.8, country_hhi=0.9
+    )
     assert len(forecast.evidence) <= 6
     assert {item["feature"] for item in forecast.evidence} <= set(EVIDENCE_LABELS)
 
@@ -235,7 +239,12 @@ def test_every_figure_the_evidence_tool_shows_is_citable():
         feature_version="t",
         horizon_seconds=120,
         evidence=[
-            {"feature": "country_hhi", "value": 0.68, "importance": 0.012345, "contribution": 0.2345}
+            {
+                "feature": "country_hhi",
+                "value": 0.68,
+                "importance": 0.012345,
+                "contribution": 0.2345,
+            }
         ],
     )
     assert {"0.68", "0.2345", "0.0123"} <= bundle.citable_numbers()

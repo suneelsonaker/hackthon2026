@@ -14,11 +14,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.ensemble import HistGradientBoostingClassifier
+from test_evidence_attribution import DRIVER_A, DRIVER_B, FEATURES, row_for, training_data
 
 from dfsi.config import FEATURE_VERSION
 from dfsi.forecaster.serve import ForecasterService
 from dfsi.forecaster.train import quiet_reference
-from test_evidence_attribution import DRIVER_A, DRIVER_B, FEATURES, row_for, training_data
 
 THRESHOLD = 0.5
 
@@ -133,7 +133,10 @@ def test_an_alert_that_needs_both_drivers_is_reported_as_needing_both(tmp_path, 
 
     # Minimality: dropping the last driver of the set leaves the alert standing.
     first, last = cf["joint"]["features"]
-    assert forecast(service, **{**both, first["feature"]: first["quiet_value"]}).risk_score >= THRESHOLD
+    assert (
+        forecast(service, **{**both, first["feature"]: first["quiet_value"]}).risk_score
+        >= THRESHOLD
+    )
     # And resetting the whole set clears it.
     calmed = {**both, first["feature"]: first["quiet_value"], last["feature"]: last["quiet_value"]}
     assert forecast(service, **calmed).risk_score < THRESHOLD
@@ -141,7 +144,9 @@ def test_an_alert_that_needs_both_drivers_is_reported_as_needing_both(tmp_path, 
 
 def test_a_single_feature_value_that_is_reported_does_clear_the_alert(tmp_path, trained):
     service = service_for(tmp_path, trained)
-    singles = forecast(service, growth_pps_60s=1.95, country_hhi=0.4).counterfactual["single_feature"]
+    singles = forecast(service, growth_pps_60s=1.95, country_hhi=0.4).counterfactual[
+        "single_feature"
+    ]
     clearing = [s for s in singles if s["clears_alone"]]
     assert clearing, "this alert is driven by growth alone, so one driver should suffice"
     top = clearing[0]

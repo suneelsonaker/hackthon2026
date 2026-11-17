@@ -4,10 +4,12 @@
     Advisor       →  what are the options?       (reads candidates, simulation)
     Validator     →  is every claim supportable? (code, not a model)
 
-Both agents run on the Claude API through the SDK's beta Tool Runner: we supply
-the tool functions and the SDK drives the request/execute/loop cycle. That is
-the right fit here — the compute is local, the tool surface is small and
-read-only, and we want no managed sandbox or external state.
+Both agents run on the Claude API through a hand-written tool-use loop over a
+small, read-only toolbox (`_call_claude`). Hand-written rather than the SDK's
+Tool Runner because the last turn must be a schema-constrained answer with
+tools switched off; the compute is local and there is no managed sandbox or
+external state. Claude's answer is validated against the numbers its tools
+actually returned, not the whole evidence bundle.
 
 If no API key is configured, or the API fails, or Claude refuses, the
 deterministic rules in `fallback.py` take over. The pipeline therefore always
@@ -19,10 +21,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from ..config import STATE_MONITORING_ONLY
+from ..config import STATE_MONITORING_ONLY, WINDOW_SECONDS
 from . import fallback
 from .prompts import ADVISOR_SYSTEM, INVESTIGATOR_SYSTEM
 from .tools import (
@@ -35,8 +38,10 @@ from .validator import monitoring_only_notice, validate
 
 log = logging.getLogger("dfsi.agents")
 
-MODEL = os.getenv("DFSI_CLAUDE_MODEL", "claude-opus-5")
-MAX_TOKENS = 2_048
+MODEL = os.getenv("DFSI_CLAUDE_MODEL", "claude-opus-5-5")
+#: Thinking tokens count against this, so it leaves room for adaptive thinking
+#: as well as the short structured answer.
+MAX_TOKENS = 16_000
 
 INVESTIGATOR_REQUIRED = ("reading", "headline", "summary")
 ADVISOR_REQUIRED = ("headline", "summary", "options")
@@ -191,7 +196,12 @@ class ExplainerOrchestrator:
             if self._client is not None:
                 self.engine = "claude"
 
-    def _build_client(self):
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError("Claude client is not configured; use the offline Explainers")
+        return self._client
+
+    def _build_client(self) -> Any:
         try:
             from anthropic import Anthropic
         except ImportError:
@@ -199,7 +209,7 @@ class ExplainerOrchestrator:
             return None
         try:
             return Anthropic(api_key=self._api_key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — any SDK fault means offline mode, never a crash
             log.warning("could not construct Anthropic client (%s); using offline Explainers", exc)
             return None
 
@@ -222,8 +232,7 @@ class ExplainerOrchestrator:
 
     def _unscored_briefing(self, bundle: EvidenceBundle) -> dict:
         reason = (
-            "the forecaster produced no risk score for this window, so there is "
-            "nothing to explain"
+            "the forecaster produced no risk score for this window, so there is nothing to explain"
         )
         log.warning("explanation withheld for range %s: %s", bundle.range_id, reason)
         withheld = [
@@ -236,7 +245,7 @@ class ExplainerOrchestrator:
             )
             for agent in ("investigator", "advisor")
         ]
-        briefing = self._briefing(bundle, *withheld, engine="withheld")
+        briefing = self._briefing(bundle, withheld[0], withheld[1], engine="withheld")
         briefing["withheld_reason"] = reason
         return briefing
 
@@ -274,15 +283,10 @@ class ExplainerOrchestrator:
             allowed_tools=INVESTIGATOR_TOOLS,
             required_fields=INVESTIGATOR_REQUIRED,
             user_turn=(
-                "A forecast for range {range_id} on account {account_id} has moved "
-                "into the '{band}' band for the next {horizon} seconds.\n\n"
+                f"A forecast for range {bundle.range_id} on account {bundle.account_id} has moved "
+                f"into the '{bundle.risk_band}' band for the next {bundle.horizon_seconds} seconds.\n\n"
                 "Gather your evidence and tell me: is an attack beginning, or is "
                 "this a legitimate surge?"
-            ).format(
-                range_id=bundle.range_id,
-                account_id=bundle.account_id,
-                band=bundle.risk_band,
-                horizon=bundle.horizon_seconds,
             ),
             offline=lambda: fallback.investigate(bundle),
         )
@@ -291,8 +295,7 @@ class ExplainerOrchestrator:
         context = (
             f"The Investigator's reading is: {reading}."
             if reading
-            else "The Investigator's reading could not be verified; treat the "
-            "situation as unknown."
+            else "The Investigator's reading could not be verified; treat the situation as unknown."
         )
         return self._run(
             agent="advisor",
@@ -353,7 +356,7 @@ class ExplainerOrchestrator:
                 )
             except _RefusalError as exc:
                 log.warning("%s: Claude declined (%s); falling back to rules", agent, exc)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — fail safe: network, quota or SDK faults fall back to rules
                 log.warning("%s: Claude call failed (%s); falling back to rules", agent, exc)
 
         if output is None:
@@ -369,17 +372,36 @@ class ExplainerOrchestrator:
         # afterwards: stamping them first would hand the tenant-scope check the
         # very values it is meant to verify.
         now_epoch = self._now_epoch(bundle)
-        report = validate(
-            output,
-            required_fields=required_fields,
-            expected_range_id=bundle.range_id,
-            expected_account_id=bundle.tenant_account_id or bundle.account_id,
-            citable_numbers=bundle.citable_numbers(),
-            evidence_epoch=bundle.newest_evidence_epoch(),
-            now_epoch=now_epoch,
-            tool_calls=toolbox.calls,
-            allowed_tools=allowed_tools,
-        )
+        # Claude is held to what its tools actually showed it. The offline
+        # rules read the bundle directly and invent nothing, so they are
+        # checked against the whole bundle.
+        shown = toolbox if engine == "claude" else bundle
+        try:
+            report = validate(
+                output,
+                required_fields=required_fields,
+                expected_range_id=bundle.range_id,
+                expected_account_id=bundle.tenant_account_id or bundle.account_id,
+                citable_numbers=shown.citable_numbers(),
+                evidence_epoch=bundle.newest_evidence_epoch(),
+                forecast_epoch=bundle.window_start_epoch,
+                now_epoch=now_epoch,
+                # A replay's clock is the exact decision instant: no skew to allow.
+                clock_skew_seconds=0 if bundle.as_of_epoch is not None else WINDOW_SECONDS,
+                tool_calls=toolbox.calls,
+                allowed_tools=allowed_tools,
+                citable_values=shown.citable_values(),
+            )
+        except Exception as exc:
+            log.exception("%s output could not be validated", agent)
+            return self._withheld(
+                agent=agent,
+                engine=engine,
+                failures=[f"the validator could not check this output ({type(exc).__name__})"],
+                checks={"validator": False},
+                warnings=[],
+                toolbox=toolbox,
+            )
 
         if not report.passed:
             log.warning("%s output rejected by validator: %s", agent, report.failures)
@@ -461,11 +483,13 @@ class ExplainerOrchestrator:
         make one last call with `output_config.format` and `tool_choice: none`
         so the answer comes back schema-conformant.
         """
+        client = self._require_client()
         tool_definitions = [_tool_definition(name) for name in allowed_tools]
         messages: list[dict] = [{"role": "user", "content": user_turn}]
 
         for _ in range(6):  # bounded: these agents need two or three reads
-            response = self._client.messages.create(
+            response = client.beta.messages.create(
+                **_REFUSAL_FALLBACK,
                 model=self.model,
                 max_tokens=MAX_TOKENS,
                 system=[
@@ -507,7 +531,8 @@ class ExplainerOrchestrator:
                 ),
             }
         )
-        final = self._client.messages.create(
+        final = client.beta.messages.create(
+            **_REFUSAL_FALLBACK,
             model=self.model,
             max_tokens=MAX_TOKENS,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
@@ -522,6 +547,8 @@ class ExplainerOrchestrator:
         )
         if final.stop_reason == "refusal":
             raise _RefusalError("model returned stop_reason=refusal on the final turn")
+        if final.stop_reason == "max_tokens":
+            raise RuntimeError("final answer was truncated at max_tokens")
 
         text = "".join(
             block.text for block in final.content if getattr(block, "type", None) == "text"
@@ -553,7 +580,7 @@ class ExplainerOrchestrator:
             handler = getattr(toolbox, name)
             payload = handler(**(block.input or {}))
             return {"type": "tool_result", "tool_use_id": block.id, "content": payload}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a failing tool is reported to the agent as an error result
             log.warning("tool %s failed: %s", name, exc)
             return {
                 "type": "tool_result",
@@ -561,6 +588,16 @@ class ExplainerOrchestrator:
                 "content": f"Tool failed: {exc}",
                 "is_error": True,
             }
+
+
+#: Server-side refusal fallback: if a safety classifier declines, the API re-runs
+#: the same request on a fallback model inside the same call. Only when the
+#: whole chain declines does `stop_reason == "refusal"` reach us, and then the
+#: agent falls back to the offline rules.
+_REFUSAL_FALLBACK: dict[str, Any] = {
+    "betas": ["server-side-fallback-2026-07-01"],
+    "fallbacks": "default",
+}
 
 
 class _RefusalError(RuntimeError):
@@ -578,7 +615,12 @@ _TOOL_SCHEMAS: dict[str, dict] = {
             "These values are the only numbers you may quote."
         ),
         "strict": True,
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
     },
     "get_recent_traffic": {
         "name": "get_recent_traffic",
@@ -607,7 +649,12 @@ _TOOL_SCHEMAS: dict[str, dict] = {
             "No IP addresses are available."
         ),
         "strict": True,
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
     },
     "get_policy_candidates": {
         "name": "get_policy_candidates",
@@ -616,7 +663,12 @@ _TOOL_SCHEMAS: dict[str, dict] = {
             "blast radius, engagement delay and how quickly each can be reversed."
         ),
         "strict": True,
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
     },
     "get_simulation_results": {
         "name": "get_simulation_results",
@@ -626,7 +678,12 @@ _TOOL_SCHEMAS: dict[str, dict] = {
             "on recorded traffic; nothing was applied."
         ),
         "strict": True,
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
     },
 }
 
